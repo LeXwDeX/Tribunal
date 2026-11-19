@@ -2,7 +2,7 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [1.9.1] - 2026-11-20
 
 ### 升级前必读
 
@@ -14,7 +14,7 @@
   - 启动自愈：`Runtime.Recover` 在恢复与 catch-up 扫描之后做一次检查，遍历已启用的项目，工作区 `state=ready`、`last_error` 正好是该文案、且按平台 `review_defaults` 加项目设置求值已不受限的，各排队一次 `workspace.refresh`（key `ws:<项目 ID>`，trigger `stale_ignore_block`，`reindex=true`，不重新生成上下文，跟随默认分支）。该项目已有排队中的刷新时不重复入队，也不改写原任务；入队持项目生命周期读锁并在锁内重读项目，不取工作区内容读锁。刷新重建索引后 `last_error` 被清空，之后再启动不会重复入队。INFO `stale ignore block refresh enqueued`（字段 `project_id`）；入队失败只记 WARN `stale ignore block refresh enqueue failed`（字段 `project_id`、`error_class`），整个检查失败记 WARN `stale ignore block check failed`（字段 `error_class`），都不影响启动恢复。
   - 仓库 `.gitlab-review.yml` 仍追加 ignore 规则的项目：检查不访问 GitLab，只看平台默认与项目设置，所以仍会为它排队刷新；刷新按完整规则求值，仍然受限就写回同一文案、不建索引，行为正确，但这类项目每次启动都会多排队一次不建索引的刷新。
   - 手动刷新：`last_error` 是该文案而当前已不受限时，即使请求 `reindex=false` 也重建索引，不再改写成 `index: code graph indexing failed`；仍然受限时行为不变。
-  - 成本与范围：每个受影响项目在升级后首次启动时完整索引一次 base checkout；没有受影响项目时启动不排队任何任务。没有配置索引命令（`x-review.index_command`）的部署，这次刷新不建索引，`last_error` 改为 `index: code graph indexing failed`，与任何一次普通刷新的结果一致。无数据库迁移，无配置变更；不改变 ignore 受限的判定规则，也不增加周期性检查。
+  - 成本与范围：每个受影响项目在升级后首次启动时完整索引一次 base checkout；没有受影响项目时启动不排队任何任务。已配置 MCP 但没有配置索引命令（`x-review.index_command`）的部署，这次刷新不建索引，`last_error` 改为 `index: code graph indexing failed`，与任何一次普通刷新的结果一致。无数据库迁移，无配置变更；不改变 ignore 受限的判定规则，也不增加周期性检查。
 
 ## [1.9.0] - 2026-11-20
 
@@ -23,7 +23,7 @@
 - **无数据库迁移，无必改配置**（[#604](https://github.com/LeXwDeX/Tribunal/issues/604)）：不新增迁移和配置项，已挂载的配置（含 `x-review.index_command`）继续有效；内置 wrapper 随镜像发布，升级镜像即生效。非容器部署需把仓库中更新后的 `scripts/codebase-memory-mcp.sh` 重新安装到 `/usr/local/bin/tribunal-codebase-memory-mcp`。升级与回滚仍按[通用升级与回滚步骤](docs/operations.md#通用升级与回滚步骤)执行。
 - **评审成本**：共享索引不能证明就是目标提交的评审（主要是目标提交与工作区索引不一致），每次都会完整索引一次本次评审的 base checkout（占用 CPU、磁盘和时间；等待并发名额最长 5 分钟，取得名额后索引最长 10 分钟，进程内最多 2 个同时运行）；默认分支 MR 在工作区索引已跟上时不额外索引。见下文「新增」与[目标提交代码图谱](docs/operations.md#目标提交代码图谱)。
 - **默认分支随 GitLab 同步**：存储的默认分支此前只在登记时写入，现在会自动跟随 GitLab；它也决定未配置 `target_branches` 时哪些 MR 被评审、哪些 push 触发刷新，同步后按新默认分支生效。见[默认分支同步](docs/operations.md#默认分支同步)。
-- **已知问题**（[#618](https://github.com/LeXwDeX/Tribunal/issues/618)，下一版本修复）：v1.5.0 之前登记或刷新、此后默认分支上没有新 push 的项目，工作区可能仍留着旧规则写入的 `index: blocked by ignore policy` 而没有共享索引；本版下这类项目每次评审都会完整索引一次目标提交。手动重建索引可立即恢复。
+- **已知问题**（[#618](https://github.com/LeXwDeX/Tribunal/issues/618)，下一版本修复）：v1.5.0 之前登记或刷新、此后默认分支上没有新 push 的项目，工作区可能仍留着旧规则写入的 `index: blocked by ignore policy` 而没有共享索引；本版下这类项目每次评审都会完整索引一次目标提交。手动重建索引可立即恢复。（已在 1.9.1 修复）
 - **wrapper 的运行时目录在路径过长时移到 `/tmp`**：wrapper 在 `$HOME/run` 不超过 57 字节时保持原样；标准镜像布局（`workspace.root: /app/data/workspaces`，`x-review.home: .mcp/codebase-memory/home`）下项目 ID 不超过 6 位时为 52 到 57 字节，项目的协调文件位置不变。更长的路径（评审目标图谱的 `HOME`，以及 7 位以上的项目 ID）改放 `/tmp/tcbm-10001/<16 位哈希>`，`/tmp` 须对服务用户可写（启用只读根文件系统的自定义部署须为 `/tmp` 提供 tmpfs 或可写卷）。图谱数据与缓存位置不变。
 
 ### 新增
@@ -603,6 +603,7 @@ v1.0.0 之后的第一个版本：产品改名为 Tribunal，修复 1.0 复审�
 
 首个版本（GitHub Pre-release），交付 M0–M6 范围：webhook 与持久化队列、DAG 调度、主 agent 编排、对抗核验与裁决、GitLab 发布、三种 LLM 协议、工作区、MCP 与 Skill、OAuth、项目授权、Web 控制台和统计。详见 [Release v1.0.0](https://github.com/LeXwDeX/Tribunal/releases/tag/v1.0.0)。
 
+[1.9.1]: https://github.com/LeXwDeX/Tribunal/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.7.1...v1.8.0
 [1.7.1]: https://github.com/LeXwDeX/Tribunal/compare/v1.7.0...v1.7.1
