@@ -13,6 +13,8 @@ import (
 	"reflect"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/LeXwDeX/tribunal/internal/llm"
 )
@@ -169,6 +171,31 @@ type unsafeResponseError struct{}
 
 func (unsafeResponseError) Error() string     { return "agent rejected unsafe model response" }
 func (unsafeResponseError) ErrorCode() string { return "unsafe_model_response" }
+
+// maxRetryFeedbackRunes bounds the retry hint a tool error may carry.
+const maxRetryFeedbackRunes = 400
+
+// retryFeedback returns the fixed retry hint carried by err, or "" when err
+// carries none. The hint reaches the model, so a method that panics, or text
+// that is empty, oversized, multi-line or not valid UTF-8, is dropped and the
+// caller keeps the generic feedback.
+func retryFeedback(err error) (message string) {
+	defer func() {
+		if recover() != nil {
+			message = ""
+		}
+	}()
+	var feedback interface{ AgentRetryFeedback() string }
+	if !errors.As(err, &feedback) {
+		return ""
+	}
+	message = feedback.AgentRetryFeedback()
+	if message == "" || !utf8.ValidString(message) || utf8.RuneCountInString(message) > maxRetryFeedbackRunes ||
+		strings.ContainsFunc(message, unicode.IsControl) {
+		return ""
+	}
+	return message
+}
 
 // validationFeedback accepts only fixed categories and known contract fields.
 // Both the error and its optional feedback method may be untrusted.

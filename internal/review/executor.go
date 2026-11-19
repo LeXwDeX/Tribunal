@@ -806,21 +806,166 @@ func shortCommit(sha string) string {
 	return sha
 }
 
+// toolUnavailableGap is the gap recorded for a tool that became unavailable
+// while the agent was using it.
+func toolUnavailableGap(block, tool string) string {
+	return toolGapMessage(block, fmt.Errorf("tool %q became unavailable", tool))
+}
+
+// maxHintedInterruptions bounds the retry hints one tool earns in one node.
+// Only its first interruption since its last success earns one, and only while
+// the node has seen fewer than this many interruptions of it: a tool that keeps
+// dropping its connection is not worth retrying forever.
+const maxHintedInterruptions = 3
+
+// toolInterruptions is what one callAgent invocation knows about one tool.
+type toolInterruptions struct {
+	consecutive int  // interruptions since the tool's last success
+	total       int  // interruptions in this node
+	pending     bool // interrupted, no later success and no gap recorded yet
+	gapped      bool // a gap for the tool is already recorded
+}
+
+// interruptedToolGaps defers the gap of a tool whose call a dropped server
+// connection cut off. The connection is re-established on the next call, so the
+// gap stands only when no later call of the same tool succeeds before the run
+// ends. A tool that runs out of retry hints gets its gap at once, and a tool
+// never gets a second gap for the same trouble. One tracker is shared by every
+// wrapped tool of one callAgent invocation.
+type interruptedToolGaps struct {
+	mu    sync.Mutex
+	tools map[string]*toolInterruptions
+	order []string // tools in the order they were first seen
+}
+
+// state returns the record of tool. p.mu must be held.
+func (p *interruptedToolGaps) state(tool string) *toolInterruptions {
+	st := p.tools[tool]
+	if st == nil {
+		if p.tools == nil {
+			p.tools = make(map[string]*toolInterruptions)
+		}
+		st = &toolInterruptions{}
+		p.tools[tool] = st
+		p.order = append(p.order, tool)
+	}
+	return st
+}
+
+// interrupted records one interruption of tool. retry reports that the call
+// still earns the retry hint, and its gap waits for the end of the run. Without
+// it, record reports that the caller has to record the gap now.
+func (p *interruptedToolGaps) interrupted(tool string) (retry, record bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	st := p.state(tool)
+	st.consecutive++
+	st.total++
+	if st.consecutive == 1 && st.total < maxHintedInterruptions {
+		st.pending = !st.gapped
+		return true, false
+	}
+	st.pending = false
+	record = !st.gapped
+	st.gapped = true
+	return false, record
+}
+
+// unavailable notes that the caller records a gap for tool at once, so that
+// neither an earlier interruption nor a later one adds a second.
+func (p *interruptedToolGaps) unavailable(tool string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	st := p.state(tool)
+	st.pending = false
+	st.gapped = true
+}
+
+// succeeded ends the run of consecutive interruptions of tool and makes up its
+// pending one. The node's total stays.
+func (p *interruptedToolGaps) succeeded(tool string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if st := p.tools[tool]; st != nil {
+		st.consecutive = 0
+		st.pending = false
+	}
+}
+
+// flush records one gap per tool that is still interrupted. mu guards gaps.
+func (p *interruptedToolGaps) flush(block string, gaps *[]string, mu *sync.Mutex) {
+	p.mu.Lock()
+	var names []string
+	for _, tool := range p.order {
+		if st := p.tools[tool]; st.pending {
+			st.pending, st.gapped = false, true
+			names = append(names, tool)
+		}
+	}
+	p.mu.Unlock()
+	if len(names) == 0 {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, name := range names {
+		*gaps = append(*gaps, toolUnavailableGap(block, name))
+	}
+}
+
+// unretriedInterruption is an interrupted call that no longer earns the retry
+// hint. It stays an unavailable tool but hides the interruption markers of the
+// error it replaces, so the agent loop falls back to its generic feedback. The
+// cause is kept as text only.
+type unretriedInterruption struct{ text string }
+
+func (e unretriedInterruption) Error() string       { return e.text }
+func (unretriedInterruption) ToolUnavailable() bool { return true }
+
 type gapRecordingTool struct {
 	agent.Tool
 	block string
 	gaps  *[]string
 	mu    *sync.Mutex
+	// pending defers the gap of an interrupted call until the run ends and
+	// limits its retry hints; nil records every unavailable call at once.
+	pending *interruptedToolGaps
+}
+
+func (t gapRecordingTool) recordGap(tool string) {
+	t.mu.Lock()
+	*t.gaps = append(*t.gaps, toolUnavailableGap(t.block, tool))
+	t.mu.Unlock()
 }
 
 func (t gapRecordingTool) Call(ctx context.Context, input json.RawMessage) (agent.Result, error) {
 	result, err := t.Tool.Call(ctx, input)
-	var unavailable interface{ ToolUnavailable() bool }
-	if ctx.Err() == nil && !errors.Is(err, context.Canceled) && errors.As(err, &unavailable) && unavailable.ToolUnavailable() {
-		t.mu.Lock()
-		*t.gaps = append(*t.gaps, toolGapMessage(t.block, fmt.Errorf("tool %q became unavailable", t.Def().Name)))
-		t.mu.Unlock()
+	name := t.Def().Name
+	if err == nil {
+		if t.pending != nil {
+			t.pending.succeeded(name)
+		}
+		return result, nil
 	}
+	var unavailable interface{ ToolUnavailable() bool }
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || !errors.As(err, &unavailable) || !unavailable.ToolUnavailable() {
+		return result, err
+	}
+	var interrupted interface{ ToolInterrupted() bool }
+	if t.pending != nil && errors.As(err, &interrupted) && interrupted.ToolInterrupted() {
+		retry, record := t.pending.interrupted(name)
+		if retry {
+			return result, err
+		}
+		if record {
+			t.recordGap(name)
+		}
+		return result, unretriedInterruption{text: err.Error()}
+	}
+	if t.pending != nil {
+		t.pending.unavailable(name)
+	}
+	t.recordGap(name)
 	return result, err
 }
 
@@ -901,8 +1046,13 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 		if opts.ToolGaps != nil {
 			mcpTools = append([]agent.Tool(nil), mcpTools...)
 			mu := &sync.Mutex{}
+			// An interrupted call is a gap only when no later call of the tool
+			// succeeds, so those gaps settle when callAgent returns, on every
+			// return path and before the caller reads them.
+			pending := &interruptedToolGaps{}
+			defer pending.flush(opts.Block, opts.ToolGaps, mu)
 			for i, tool := range mcpTools {
-				mcpTools[i] = gapRecordingTool{Tool: tool, block: opts.Block, gaps: opts.ToolGaps, mu: mu}
+				mcpTools[i] = gapRecordingTool{Tool: tool, block: opts.Block, gaps: opts.ToolGaps, mu: mu, pending: pending}
 			}
 		}
 		switch {

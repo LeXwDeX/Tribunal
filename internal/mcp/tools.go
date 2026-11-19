@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"sort"
 	"strings"
@@ -389,6 +390,35 @@ func (e unavailableToolError) Error() string         { return e.err.Error() }
 func (e unavailableToolError) Unwrap() error         { return e.err }
 func (e unavailableToolError) ToolUnavailable() bool { return true }
 
+// interruptedRetryFeedback is shown to the model after a call lost its server
+// connection. It is fixed text: it names no server and carries nothing the
+// server or the transport reported.
+const interruptedRetryFeedback = "the connection to the tool server was interrupted and is re-established on the next call; " +
+	"this is a read-only query, so retry the same call once; if it fails again, continue without this tool"
+
+// interruptedToolError marks a tool call cut off by a closed server connection.
+// The manager reconnects on the next call, so the agent is told to retry once
+// and the review records a gap only when no later call of the tool succeeds.
+// Like unavailableToolError it exposes no server data.
+type interruptedToolError struct{ err error }
+
+func (e interruptedToolError) Error() string              { return e.err.Error() }
+func (e interruptedToolError) Unwrap() error              { return e.err }
+func (e interruptedToolError) ToolUnavailable() bool      { return true }
+func (e interruptedToolError) ToolInterrupted() bool      { return true }
+func (e interruptedToolError) AgentRetryFeedback() string { return interruptedRetryFeedback }
+
+// callFailure classifies a failed tool call. A connection closed under a live
+// caller is an interruption the next call recovers from. A timeout, a connect
+// failure, a refusal, a caller that is already done and a manager that is
+// closed stay plain unavailable errors: no retry can make those up.
+func (m *Manager) callFailure(ctx context.Context, err error) error {
+	if ctx.Err() == nil && errors.Is(err, ErrConnectionClosed) && !errors.Is(err, ErrClosed) && !m.isClosed() {
+		return interruptedToolError{err}
+	}
+	return unavailableToolError{err}
+}
+
 func (t *mcpTool) Def() llm.ToolDef { return t.def }
 
 func (t *mcpTool) Call(ctx context.Context, raw json.RawMessage) (agent.Result, error) {
@@ -413,20 +443,20 @@ func (t *mcpTool) Call(ctx context.Context, raw json.RawMessage) (agent.Result, 
 func (m *Manager) call(ctx context.Context, server, tool string, args json.RawMessage, requireReadOnly bool) (agent.Result, error) {
 	entry, err := m.acquire(ctx, server)
 	if err != nil {
-		return agent.Result{}, unavailableToolError{err}
+		return agent.Result{}, m.callFailure(ctx, err)
 	}
 	defer entry.end()
 
 	session, err := entry.current()
 	if err != nil {
-		return agent.Result{}, unavailableToolError{err}
+		return agent.Result{}, m.callFailure(ctx, err)
 	}
 	callCtx, cancel := context.WithTimeout(ctx, entry.cfg.XReview.CallTimeout.AsDuration())
 	defer cancel()
 
 	raws, err := entry.list(callCtx)
 	if err != nil {
-		return agent.Result{}, unavailableToolError{entry.callError(ctx, callCtx, err)}
+		return agent.Result{}, m.callFailure(ctx, entry.callError(ctx, callCtx, err))
 	}
 	var advertised *sdk.Tool
 	for _, raw := range raws {
@@ -451,7 +481,7 @@ func (m *Manager) call(ctx context.Context, server, tool string, args json.RawMe
 		if ctx.Err() == nil && errors.As(err, &rpcErr) && rpcErr.Code == jsonrpc.CodeInvalidParams {
 			return agent.Result{}, safeErr
 		}
-		return agent.Result{}, unavailableToolError{safeErr}
+		return agent.Result{}, m.callFailure(ctx, safeErr)
 	}
 	if res == nil {
 		return agent.Result{}, unavailableToolError{fmt.Errorf("%w: %q: empty result", ErrCallFailed, server)}
@@ -464,13 +494,24 @@ func (m *Manager) call(ctx context.Context, server, tool string, args json.RawMe
 }
 
 func (entry *serverEntry) callError(parent, callCtx context.Context, err error) error {
-	if errors.Is(err, sdk.ErrConnectionClosed) {
+	closed := errors.Is(err, sdk.ErrConnectionClosed)
+	if closed {
 		entry.markDead(err)
+	}
+	// SDK 1.8.0 completes a call that was in flight when the peer died with the
+	// bare read error, not with ErrConnectionClosed. While the caller still
+	// waits and the call has time left, that is the same closed connection. A
+	// caller that is done, or a call that ran out of time, says nothing about
+	// the connection. Unlike ErrConnectionClosed, the bare error does not mean
+	// the session has ended, so the entry is evicted with its session.
+	if !closed && parent.Err() == nil && callCtx.Err() == nil && streamEnded(err) {
+		entry.evict(err)
+		closed = true
 	}
 	if parent.Err() != nil {
 		return fmt.Errorf("%w: server %q", parent.Err(), entry.key.server)
 	}
-	if errors.Is(err, sdk.ErrConnectionClosed) {
+	if closed {
 		return fmt.Errorf("%w: %q", ErrConnectionClosed, entry.key.server)
 	}
 	entry.mu.Lock()
@@ -483,6 +524,12 @@ func (entry *serverEntry) callError(parent, callCtx context.Context, err error) 
 		return fmt.Errorf("%w: server %q: call timed out", ErrCallFailed, entry.key.server)
 	}
 	return fmt.Errorf("%w: %q", ErrCallFailed, entry.key.server)
+}
+
+// streamEnded reports the bare end-of-stream errors a transport returns when
+// the peer is gone.
+func streamEnded(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 func formatCallResult(res *sdk.CallToolResult, max int) (string, bool) {

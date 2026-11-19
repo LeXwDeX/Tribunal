@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,6 +108,14 @@ func TestGoHelperExitStatus(t *testing.T) {
 	}
 }
 
+// helperHungUp is set by the hangup tool in the helper process, which then has
+// to be terminated by its parent because it no longer exits on its own.
+var helperHungUp atomic.Bool
+
+// helperHangFor bounds how long a hung-up helper outlives a test that forgot to
+// end it.
+const helperHangFor = 2 * time.Minute
+
 func testServer() *sdk.Server {
 	server := sdk.NewServer(&sdk.Implementation{Name: "test-mcp", Version: "1.0.0"}, nil)
 	add := func(tool *sdk.Tool, handler func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error)) {
@@ -170,6 +179,37 @@ func testServer() *sdk.Server {
 		func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
 			os.Exit(7)
 			return nil, nil
+		})
+	add(&sdk.Tool{Name: "crash_when", Description: "exit once a file exists", InputSchema: json.RawMessage(`{"type":"object"}`)},
+		func(ctx context.Context, req *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+			var in struct {
+				Path string `json:"path"`
+			}
+			if len(req.Params.Arguments) > 0 {
+				if err := json.Unmarshal(req.Params.Arguments, &in); err != nil {
+					return nil, err
+				}
+			}
+			for {
+				if _, err := os.Stat(in.Path); err == nil {
+					// A clean exit, so that closing the dead session reports no error.
+					os.Exit(0)
+				}
+				select {
+				case <-time.After(5 * time.Millisecond):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+		})
+	add(&sdk.Tool{Name: "hangup", Description: "close stdout and stay alive", InputSchema: json.RawMessage(`{"type":"object"}`)},
+		func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+			// The peer sees the end of the stream while this process lives on.
+			helperHungUp.Store(true)
+			_ = os.Stdout.Close()
+			// A pending timer keeps the runtime from reporting a deadlock.
+			time.Sleep(helperHangFor)
+			return nil, errors.New("hangup helper was not terminated")
 		})
 	destructive := true
 	add(&sdk.Tool{
