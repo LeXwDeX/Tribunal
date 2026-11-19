@@ -116,3 +116,18 @@ export function elapsedSince(start?: string, now = Date.now()): string {
   const minutes = Math.floor(seconds / 60)
   return `${minutes}m ${seconds % 60}s`
 }
+
+// useClientPage pages rows already held in the client (see TablePager). The
+// page clamps when the row count shrinks.
+export function useClientPage<T>(items: readonly T[], pageSize = 20) {
+  const [requested, setPage] = useState(1)
+  const pageCount = Math.max(1, Math.ceil(items.length / pageSize))
+  const page = Math.min(Math.max(1, requested), pageCount)
+  return {
+    page,
+    pageCount,
+    total: items.length,
+    setPage,
+    items: items.slice((page - 1) * pageSize, page * pageSize),
+  }
+}

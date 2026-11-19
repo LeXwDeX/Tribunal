@@ -2,7 +2,10 @@ import { useEffect, useMemo, useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getConfig, getConfigStatus } from '../api/api'
 import type { ConfigOrigin } from '../api/types'
-import { Badge, EmptyState, ErrorState, LoadingState, Note, Panel, PanelBody } from '../components/ui'
+import {
+  Badge, DataTable, EmptyState, ErrorState, LoadingState, Note, Panel, PanelBody, TABLE_PAGE_SIZE, TablePager, tableCell,
+} from '../components/ui'
+import { useClientPage } from '../lib/hooks'
 import ui from '../styles/ui.module.css'
 
 const STATUS_POLL_MS = 5000
@@ -109,6 +112,7 @@ export function ConfigSourcesPanel({ enabled }: { enabled: boolean }) {
       .filter((row) => row.value === null || ['string', 'number', 'boolean'].includes(typeof row.value))
       .sort((left, right) => left.path.localeCompare(right.path))
   }, [snapshot.data])
+  const paged = useClientPage(rows, TABLE_PAGE_SIZE)
 
   return (
     <Panel
@@ -154,8 +158,8 @@ export function ConfigSourcesPanel({ enabled }: { enabled: boolean }) {
           <EmptyState title="没有可显示的配置项" description="服务端返回的生效配置为空。" />
         ) : null}
         {snapshot.isSuccess && rows.length ? (
-          <div className="tableWrap">
-            <table className="dataTable">
+          <>
+            <DataTable label="配置来源" minWidth="md">
               <thead>
                 <tr>
                   <th scope="col">配置项</th>
@@ -164,16 +168,17 @@ export function ConfigSourcesPanel({ enabled }: { enabled: boolean }) {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((row) => (
+                {paged.items.map((row) => (
                   <tr key={row.path}>
-                    <td className="mono small">{row.path}</td>
-                    <td className="mono small">{formatValue(row.value)}</td>
+                    <td className={tableCell.mono}>{row.path}</td>
+                    <td className={tableCell.mono}>{formatValue(row.value)}</td>
                     <td><Badge tone={ORIGIN_TONES[row.origin]} plain>{ORIGIN_LABELS[row.origin] ?? row.origin}</Badge></td>
                   </tr>
                 ))}
               </tbody>
-            </table>
-          </div>
+            </DataTable>
+            <TablePager page={paged.page} pageCount={paged.pageCount} total={paged.total} onChange={paged.setPage} />
+          </>
         ) : null}
       </PanelBody>
     </Panel>

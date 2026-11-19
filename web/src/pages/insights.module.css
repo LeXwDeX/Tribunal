@@ -48,37 +48,6 @@
   border-top: 1px solid var(--border);
 }
 
-.rowActions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: var(--space-sm);
-}
-
-.rowHint {
-  display: block;
-  margin-top: var(--space-2xs);
-  text-align: right;
-  font-size: var(--fs-label);
-  color: var(--muted);
-}
-
-.actionsCol {
-  text-align: right;
-}
-
-/* Table minimum widths: tables scroll inside .tableWrap instead of the page. */
-.min480 { min-width: 480px; }
-.min560 { min-width: 560px; }
-.min640 { min-width: 640px; }
-.min680 { min-width: 680px; }
-.min760 { min-width: 760px; }
-.min820 { min-width: 820px; }
-.min920 { min-width: 920px; }
-
-.autoTable { min-width: 560px; }
-.autoTable th { min-width: 130px; }
-
 /* --- 模型与档位 --- */
 
 .cards {
@@ -436,9 +405,18 @@
   color: var(--muted);
 }
 
+/* Detail row under a table row that holds the nested daily-trend table. */
 .trendCell {
-  padding: var(--space-md);
   background: var(--surface-2);
+}
+
+/* errors_by_kind badges wrap onto further lines. They are never truncated:
+   the table cell is as wide as its widest badge. */
+.kindList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  min-width: 0;
 }
 
 .ratio {
@@ -544,4 +522,29 @@
   .profileStep + .profileStep::before {
     content: none;
   }
+}
+
+/* Two stacked values in one table cell (primary over secondary), used to keep
+   wide tables within the panel at desktop widths. */
+.stacked,
+.stackedEnd {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.stackedEnd {
+  align-items: flex-end;
+}
+
+.stackedMono {
+  font-family: var(--font-mono);
+  font-size: var(--fs-meta);
+  overflow-wrap: anywhere;
+}
+
+.stackedSub {
+  font-size: var(--fs-meta);
+  color: var(--muted);
 }

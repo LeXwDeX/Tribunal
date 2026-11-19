@@ -1,9 +1,14 @@
 /* v2 项目列表、项目详情与工作区的页面级样式（prototype/v2 第 4 节）。 */
 
 .pathCell {
+  color: var(--text);
   font-family: var(--font-mono);
   font-size: var(--fs-body-sm);
   font-weight: var(--fw-semibold);
+}
+
+.pathCell:hover {
+  color: var(--link);
 }
 
 .expiryWarn {
@@ -375,27 +380,22 @@
   }
 }
 
-/* 项目列表：flush 面板里的工具栏与全宽表格 */
+/* 项目列表：flush 面板里的工具栏；表格本身由 DataTable 提供 */
 .search {
   flex: 0 1 280px;
   min-width: 0;
 }
 
-.projectTable {
-  min-width: 1060px;
+.rowLink {
+  cursor: pointer;
 }
 
-.projectTable .pathCell {
-  color: var(--text);
-}
-
-.projectTable .pathCell:hover {
-  color: var(--link);
-}
-
-.tableFooter {
-  padding: var(--space-md) var(--space-lg);
-  border-top: 1px solid var(--border);
+/* Status columns keep their natural width: when the table is narrow only the
+   path and review columns give way, so a badge never breaks mid-word. The
+   min-width sits on the cell content because browsers ignore an intrinsic
+   min-width on the cell itself. */
+.fit > * {
+  min-width: max-content;
 }
 
 @media (max-width: 900px) {

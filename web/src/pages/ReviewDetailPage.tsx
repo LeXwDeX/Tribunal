@@ -8,8 +8,8 @@ import type { Finding, FindingAnnotation, FindingsSummary, ReviewDetail } from '
 import { Icon } from '../components/Icons'
 import { TriggerReviewDialog } from '../components/TriggerReviewDialog'
 import {
-  ActionHint, Badge, Button, ButtonLink, ConfirmDialog, Disclosure, EmptyState, ErrorState, LoadingState, Panel, PanelBody,
-  PublicationBadge, RelativeTime, Segmented, Select, SeverityBadge, StatusBadge, classNames, useToast,
+  ActionHint, Badge, Button, ButtonLink, ConfirmDialog, DataTable, Disclosure, EmptyState, ErrorState, LoadingState, Panel,
+  PanelBody, Pagination, PublicationBadge, RelativeTime, Segmented, Select, SeverityBadge, StatusBadge, classNames, useToast,
 } from '../components/ui'
 import { ExecutionGraph } from '../features/review/ExecutionGraph'
 import { NodeDrawer } from '../features/review/NodeDrawer'
@@ -869,44 +869,43 @@ export function ReviewDetailPage() {
                 <PanelBody><EmptyState title="没有符合条件的问题" description="调整处置或级别筛选；这不表示评审没有产生过问题。" /></PanelBody>
               ) : null}
               {findings.items.length ? (
-                <div className="tableWrap">
-                  <table className={`dataTable ${rv.findingsTable}`}>
-                    <thead>
-                      <tr>
-                        <th scope="col">级别</th>
-                        <th scope="col">标题</th>
-                        <th scope="col">提出 → 挑战 → 裁决</th>
-                        <th scope="col">人工</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {findings.items.map((finding, index) => (
-                        <FindingRow
-                          key={finding.id}
-                          finding={finding}
-                          index={index}
-                          expanded={expanded.has(finding.id)}
-                          canAnnotate={canWrite}
-                          onSaveAnnotation={(annotation) => annotateFinding(finding, annotation)}
-                          onToggle={() => {
-                            setExpanded((current) => {
-                              const next = new Set(current)
-                              if (next.has(finding.id)) next.delete(finding.id)
-                              else next.add(finding.id)
-                              return next
-                            })
-                          }}
-                        />
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                <DataTable label="问题列表" minWidth="lg">
+                  <thead>
+                    <tr>
+                      <th scope="col">级别</th>
+                      <th scope="col">标题</th>
+                      <th scope="col">提出 → 挑战 → 裁决</th>
+                      <th scope="col">人工</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {findings.items.map((finding, index) => (
+                      <FindingRow
+                        key={finding.id}
+                        finding={finding}
+                        index={index}
+                        expanded={expanded.has(finding.id)}
+                        canAnnotate={canWrite}
+                        onSaveAnnotation={(annotation) => annotateFinding(finding, annotation)}
+                        onToggle={() => {
+                          setExpanded((current) => {
+                            const next = new Set(current)
+                            if (next.has(finding.id)) next.delete(finding.id)
+                            else next.add(finding.id)
+                            return next
+                          })
+                        }}
+                      />
+                    ))}
+                  </tbody>
+                </DataTable>
               ) : null}
-              {findings.hasNextPage ? (
-                <div className={rv.loadMore}>
-                  <Button variant="secondary" className={ui.smallButton} onClick={findings.fetchNextPage} loading={findings.isFetchingNextPage}>加载更多问题</Button>
-                </div>
-              ) : null}
+              <Pagination
+                hasNextPage={findings.hasNextPage}
+                loading={findings.isFetchingNextPage}
+                onLoadMore={findings.fetchNextPage}
+                label="加载更多问题"
+              />
               <div className={ui.tableNote}>正文与证据以纯文本展示。</div>
             </Panel>
           </div>

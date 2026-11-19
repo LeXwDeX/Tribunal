@@ -107,6 +107,17 @@ describe('projects list v2 layout', () => {
     expect(within(admin).getByText('管理员')).toBeInTheDocument()
   })
 
+  it('renders the list through the shared table with Chinese headers in a fixed order', async () => {
+    installFetch((url) => url.startsWith('/api/v1/projects') ? jsonResponse({ projects: [project()] }) : jsonResponse({}))
+    renderProjects()
+
+    const table = await screen.findByRole('table', { name: '项目列表' })
+    expect(within(table).getAllByRole('columnheader').map((header) => header.textContent))
+      .toEqual(['项目', '工作区', '最近评审', 'Key 过期', 'Webhook', '权限', '启用'])
+    // Every row cell sits in one table; no second table or legacy wrapper is rendered.
+    expect(screen.getAllByRole('table')).toHaveLength(1)
+  })
+
   it('shows the platform shared bot instead of a missing key expiry', async () => {
     installFetch((url) => {
       if (url.startsWith('/api/v1/projects')) {

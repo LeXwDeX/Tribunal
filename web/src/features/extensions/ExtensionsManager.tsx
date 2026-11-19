@@ -12,10 +12,11 @@ import type {
 } from '../../api/types'
 import { useCanWrite } from '../../components/RoleContext'
 import {
-  ActionHint, Badge, Button, Checkbox, ConfirmDialog, Dialog, Disclosure, EmptyState, ErrorState, Field, FieldHint,
-  LoadingState, Note, Panel, Select, Tabs, Textarea, useToast,
+  ActionHint, Badge, Button, Checkbox, ConfirmDialog, DataTable, Dialog, Disclosure, EmptyState, ErrorState, Field,
+  FieldHint, LoadingState, Note, Panel, ReasonBadge, Select, TableAction, TableActions, TablePager, Tabs, Textarea,
+  classNames, tableCell, useToast,
 } from '../../components/ui'
-import { usePaginated } from '../../lib/hooks'
+import { useClientPage, usePaginated } from '../../lib/hooks'
 import { formatJson } from '../../lib/format'
 import ui from '../../styles/ui.module.css'
 import styles from '../../pages/pages.module.css'
@@ -638,100 +639,101 @@ function McpTab({
           <ActionHint>新增或导入后可先测试连接；测试不写入服务器。</ActionHint>
         </>
       ) : null}
-      {servers.isPending ? <LoadingState /> : null}
-      {servers.isError ? <ErrorState error={servers.error} onRetry={servers.retry} /> : null}
-      {servers.isSuccess && servers.items.length === 0 ? (
-        <EmptyState
-          title="还没有 MCP 服务器"
-          description={canWrite
-            ? '内置 MCP 由平台管理；可新增或导入自定义服务器。'
-            : '内置 MCP 由平台管理。'}
-        />
-      ) : null}
-      {servers.items.length ? (
-        <div className="tableWrap">
-          <table className={ext.mcpTable}>
-            <thead>
-              <tr>
-                <th scope="col">名称</th>
-                <th scope="col">作用域</th>
-                <th scope="col">命令</th>
-                <th scope="col">状态</th>
-                <th scope="col" className="right">工具</th>
-                {canWrite ? <th scope="col" className="right">操作</th> : null}
-              </tr>
-            </thead>
-            <tbody>
-              {servers.items.map((server) => {
-                const result = testResults[server.id]
-                const hasDetail = Boolean(server.last_error || result)
-                return (
-                  <Fragment key={server.id}>
-                    <tr>
-                      <td>
-                        <div className={ext.nameCell}>
-                          <span className="mono">{server.name}</span>
-                          {server.builtin ? <Badge tone="info" plain>内置</Badge> : null}
+      <DataTable
+        label="MCP 服务器"
+        minWidth="xl"
+        isEmpty={servers.items.length === 0}
+        loading={servers.isPending}
+        error={servers.isError ? servers.error : undefined}
+        onRetry={servers.retry}
+        empty={(
+          <EmptyState
+            title="还没有 MCP 服务器"
+            description={canWrite
+              ? '内置 MCP 由平台管理；可新增或导入自定义服务器。'
+              : '内置 MCP 由平台管理。'}
+          />
+        )}
+      >
+        <thead>
+          <tr>
+            <th scope="col">名称</th>
+            <th scope="col" className={tableCell.nowrap}>作用域</th>
+            <th scope="col">命令</th>
+            <th scope="col" className={tableCell.nowrap}>状态</th>
+            <th scope="col" className={tableCell.num}>工具</th>
+            {canWrite ? <th scope="col" className={tableCell.actions}>操作</th> : null}
+          </tr>
+        </thead>
+        <tbody>
+          {servers.items.map((server) => {
+            const result = testResults[server.id]
+            const hasDetail = Boolean(server.last_error || result)
+            return (
+              <Fragment key={server.id}>
+                <tr>
+                  <td>
+                    <div className={ext.nameCell}>
+                      <span className="mono">{server.name}</span>
+                      {server.builtin ? <Badge tone="info" plain>内置</Badge> : null}
+                    </div>
+                  </td>
+                  <td className={classNames(tableCell.muted, tableCell.nowrap)}>{server.scope === 'platform' ? '平台级' : `项目级 · ${projectName || `#${server.project_id}`}`}</td>
+                  <td className={tableCell.mono}>{mcpCommand(server)}</td>
+                  <td className={tableCell.nowrap}>
+                    <ReasonBadge tone={server.enabled ? 'ok' : 'neutral'} reason={server.status || '状态未提供'}>
+                      <span className={ext.statusText}>{server.enabled ? '启用' : '停用'}</span>
+                    </ReasonBadge>
+                  </td>
+                  <td className={tableCell.num}>
+                    {result?.result && typeof result.result.tool_count === 'number'
+                      ? result.result.tool_count
+                      : server.tools?.length ? server.tools.length : <span className={tableCell.muted}>未提供</span>}
+                  </td>
+                  {canWrite ? (
+                    <td className={tableCell.actions}>
+                      <TableActions>
+                        <TableAction onClick={() => onTest(server)} loading={result?.pending}>测试并列出工具</TableAction>
+                        {!server.builtin ? (
+                          <>
+                            <TableAction onClick={() => onEdit(server)}>编辑</TableAction>
+                            <TableAction tone="danger" onClick={() => onDelete(server)}>删除</TableAction>
+                          </>
+                        ) : null}
+                      </TableActions>
+                    </td>
+                  ) : null}
+                </tr>
+                {hasDetail ? (
+                  <tr>
+                    <td colSpan={canWrite ? 6 : 5} className={ext.detailCell}>
+                      {server.last_error ? <span className={styles.resultError}>{server.last_error}</span> : null}
+                      {result?.pending ? <span className={styles.testResult} role="status">正在测试连接…</span> : null}
+                      {result?.error ? (
+                        <div className={ext.testFailure}>
+                          <span className={styles.resultError} role="status">测试失败：{testFailureText(result)}</span>
+                          <TableAction onClick={() => onTest(server)}>重试测试</TableAction>
                         </div>
-                      </td>
-                      <td className="muted">{server.scope === 'platform' ? '平台级' : `项目级 · ${projectName || `#${server.project_id}`}`}</td>
-                      <td><code className={ext.command}>{mcpCommand(server)}</code></td>
-                      <td>
-                        <div className={ext.nameCell}>
-                          <Badge tone={server.enabled ? 'ok' : 'neutral'}>{server.enabled ? '启用' : '停用'}</Badge>
-                          <span className="small muted">{server.status || '状态未提供'}</span>
-                        </div>
-                      </td>
-                      <td className="right num">
-                        {result?.result && typeof result.result.tool_count === 'number'
-                          ? result.result.tool_count
-                          : server.tools?.length ? server.tools.length : <span className="muted">未提供</span>}
-                      </td>
-                      {canWrite ? (
-                        <td className="right">
-                          <div className={ext.rowActions}>
-                            <Button variant="secondary" className={ui.smallButton} onClick={() => onTest(server)} loading={result?.pending}>测试并列出工具</Button>
-                            {!server.builtin ? (
-                              <>
-                                <Button variant="secondary" className={ui.smallButton} onClick={() => onEdit(server)}>编辑</Button>
-                                <Button variant="danger" className={ui.smallButton} onClick={() => onDelete(server)}>删除</Button>
-                              </>
-                            ) : null}
-                          </div>
-                        </td>
                       ) : null}
-                    </tr>
-                    {hasDetail ? (
-                      <tr className={ext.detailRow}>
-                        <td colSpan={canWrite ? 6 : 5}>
-                          {server.last_error ? <span className={styles.resultError}>{server.last_error}</span> : null}
-                          {result?.pending ? <span className={styles.testResult} role="status">正在测试连接…</span> : null}
-                          {result?.error ? (
-                            <div className={ext.testFailure}>
-                              <span className={styles.resultError} role="status">测试失败：{testFailureText(result)}</span>
-                              <Button variant="secondary" className={ui.smallButton} onClick={() => onTest(server)}>重试测试</Button>
-                            </div>
-                          ) : null}
-                          {result?.result ? <TestResultPanel result={result.result} /> : null}
-                        </td>
-                      </tr>
-                    ) : null}
-                  </Fragment>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
-      ) : null}
+                      {result?.result ? <TestResultPanel result={result.result} /> : null}
+                    </td>
+                  </tr>
+                ) : null}
+              </Fragment>
+            )
+          })}
+        </tbody>
+      </DataTable>
       {servers.hasNextPage ? <Button variant="secondary" onClick={servers.fetchNextPage} loading={servers.isFetchingNextPage}>加载更多 MCP 服务器</Button> : null}
     </Panel>
   )
 }
 
 function ToolTable({ tools }: { tools: McpTool[] }) {
+  const paged = useClientPage(tools)
   return (
-    <div className="tableWrap">
-      <table className={ext.toolTable}>
+    <>
+      <DataTable label="MCP 工具" minWidth="md">
         <thead>
           <tr>
             <th scope="col">工具</th>
@@ -740,10 +742,10 @@ function ToolTable({ tools }: { tools: McpTool[] }) {
           </tr>
         </thead>
         <tbody>
-          {tools.map((tool) => (
+          {paged.items.map((tool) => (
             <tr key={tool.name}>
-              <td><code className="mono small">{tool.name}</code></td>
-              <td className="small muted">{tool.description || '—'}</td>
+              <td className={tableCell.mono}>{tool.name}</td>
+              <td className={tableCell.muted}>{tool.description || '—'}</td>
               <td>
                 <div className={ext.toolBadges}>
                   {tool.annotated === false ? (
@@ -764,8 +766,9 @@ function ToolTable({ tools }: { tools: McpTool[] }) {
             </tr>
           ))}
         </tbody>
-      </table>
-    </div>
+      </DataTable>
+      <TablePager page={paged.page} pageCount={paged.pageCount} total={paged.total} onChange={paged.setPage} />
+    </>
   )
 }
 
@@ -1093,6 +1096,21 @@ function mergeBindingDrafts(
 
   return { baseline, local, conflicts, revisions }
 }
+// Tool names are mcp__server__tool; a matrix header may wrap after each separator.
+function BreakableName({ name }: { name: string }) {
+  const parts = name.split('__')
+  return (
+    <>
+      {parts.map((part, index) => (
+        <Fragment key={index}>
+          {part}
+          {index < parts.length - 1 ? <>__<wbr /></> : null}
+        </Fragment>
+      ))}
+    </>
+  )
+}
+
 function BindingsTab({
   canWrite, scope, projectId, bindingState, servers, skills, testResults, refreshBindings, onDirtyChange, onBusyChange,
 }: {
@@ -1663,19 +1681,26 @@ function BindingsTab({
         </div>
       ) : (
       <>
-          <div className={styles.matrixWrap}>
-            <table className={styles.matrix}>
+          <div className={ext.matrixScroll}>
+            <DataTable label="块绑定矩阵" minWidth="lg">
               <thead>
                 <tr>
                   <th scope="col">块</th>
-                  {canRestore ? <th scope="col" className="right">默认</th> : null}
+                  {canRestore ? <th scope="col" className={tableCell.actions}>默认</th> : null}
                   {toolColumns.map((tool) => (
-                    <th key={tool} scope="col">
-                      <span>{tool}</span>
-                      {toolMeta.get(tool) === false ? <span className={ext.matrixLocked}>不可绑定</span> : null}
+                    // The wbr break points would add spaces to the computed name, so name the header explicitly.
+                    <th key={tool} scope="col" aria-label={toolMeta.get(tool) === false ? `${tool} 不可绑定` : tool}>
+                      <div className={ext.matrixHead}>
+                        <span><BreakableName name={tool} /></span>
+                        {toolMeta.get(tool) === false ? <span className={ext.matrixLocked}>不可绑定</span> : null}
+                      </div>
                     </th>
                   ))}
-                  {skillColumns.map((skill) => <th key={`skill-${skill}`} scope="col">skill: {skill}</th>)}
+                  {skillColumns.map((skill) => (
+                    <th key={`skill-${skill}`} scope="col">
+                      <div className={ext.matrixHead}>skill: {skill}</div>
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
@@ -1684,23 +1709,23 @@ function BindingsTab({
                   return (
                     <tr key={block}>
                       <th scope="row">
-                        <div className={ext.nameCell}>
+                        <div className={ext.matrixRowName}>
                           <span>{block}</span>
                           {conflicts[block] ? <Badge tone="warn" plain>冲突</Badge> : null}
                         </div>
                       </th>
                       {canRestore ? (
-                        <td className="right">
+                        <td className={tableCell.actions}>
                           {blocks.includes(block) ? (
-                            <Button
-                              variant="secondary"
-                              className={ui.smallButton}
-                              disabled={dirty || saving || restoring || hasConflicts}
-                              onClick={() => openRestore(block)}
-                              aria-label={`恢复 ${block} 的默认绑定`}
-                            >
-                              恢复
-                            </Button>
+                            <TableActions>
+                              <TableAction
+                                disabled={dirty || saving || restoring || hasConflicts}
+                                onClick={() => openRestore(block)}
+                                aria-label={`恢复 ${block} 的默认绑定`}
+                              >
+                                恢复
+                              </TableAction>
+                            </TableActions>
                           ) : null}
                         </td>
                       ) : null}
@@ -1711,7 +1736,7 @@ function BindingsTab({
                           <td key={tool}>
                             <button
                               type="button"
-                              className={[styles.matrixCell, on ? styles.matrixCellOn : ''].filter(Boolean).join(' ')}
+                              className={classNames(styles.matrixCell, ext.matrixToggle, on && styles.matrixCellOn)}
                               aria-pressed={on}
                               aria-label={`${block} 使用 ${tool}`}
                               disabled={!editable || (!bindable && !on)}
@@ -1728,7 +1753,7 @@ function BindingsTab({
                           <td key={`skill-${skill}`}>
                             <button
                               type="button"
-                              className={[styles.matrixCell, on ? styles.matrixCellOn : ''].filter(Boolean).join(' ')}
+                              className={classNames(styles.matrixCell, ext.matrixToggle, on && styles.matrixCellOn)}
                               aria-pressed={on}
                               aria-label={`${block} 使用 Skill ${skill}`}
                               disabled={!editable}
@@ -1743,7 +1768,7 @@ function BindingsTab({
                   )
                 })}
               </tbody>
-            </table>
+            </DataTable>
           </div>
           <span className={styles.matrixNote}>工具名用 `mcp__server__tool` 形式；MCP 测试成功后发现的工具出现在列中。</span>
       {saveError ? <ErrorState error={saveError} title="保存绑定失败" /> : null}

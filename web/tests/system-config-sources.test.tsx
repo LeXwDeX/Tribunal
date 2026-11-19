@@ -1,12 +1,25 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { screen } from '@testing-library/react'
+import { screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { SystemPage } from '../src/pages/SystemPage'
 import { installFetch, jsonResponse, renderWithProviders } from './test-utils'
 
 const warnings = ['providers.claude.reasoning.effort is not sent by anthropic without output_config_effort']
 
-function mock() {
+const defaultConfig = {
+  server: { listen: ':9090' },
+  jobs: { workers: 3 },
+  providers: [{ name: 'primary.eu', model: 'claude-sonnet', api_key_configured: true }],
+}
+
+const defaultOrigins = {
+  'server.listen': 'base',
+  'server.write_timeout': 'overlay',
+  'jobs.workers': 'overlay',
+  'providers.primary.eu.model': 'base',
+}
+
+function mock({ config = defaultConfig, origins = defaultOrigins }: { config?: unknown; origins?: Record<string, string> } = {}) {
   return installFetch((url) => {
     const path = new URL(url, 'http://localhost').pathname
     if (path === '/api/v1/me') return jsonResponse({ id: 7, username: 'alice', role: 'admin', global_read: false, csrf_token: 'x' })
@@ -27,17 +40,8 @@ function mock() {
     }
     if (path === '/api/v1/config') {
       return jsonResponse({
-        config: {
-          server: { listen: ':9090' },
-          jobs: { workers: 3 },
-          providers: [{ name: 'primary.eu', model: 'claude-sonnet', api_key_configured: true }],
-        },
-        origins: {
-          'server.listen': 'base',
-          'server.write_timeout': 'overlay',
-          'jobs.workers': 'overlay',
-          'providers.primary.eu.model': 'base',
-        },
+        config,
+        origins,
         warnings,
         base_revision: 'aaaaaaaaaaaaaaaa',
         overlay_revision: 'bbbbbbbbbbbbbbbb',
@@ -70,5 +74,29 @@ describe('configuration sources panel (#410)', () => {
     expect(screen.getAllByText('基础配置').length).toBeGreaterThan(0)
     expect(screen.getByRole('alert')).toHaveTextContent('server.overlay.yaml')
     expect(screen.getAllByRole('status').some((node) => node.textContent?.includes('reasoning.effort'))).toBe(true)
+  })
+
+  it('renders origins in the shared table and pages long lists on the client', async () => {
+    const keys = Array.from({ length: 25 }, (_, index) => `item${String(index + 1).padStart(2, '0')}`)
+    mock({
+      config: { limits: Object.fromEntries(keys.map((key, index) => [key, index + 1])) },
+      origins: Object.fromEntries(keys.map((key) => [`limits.${key}`, 'base'])),
+    })
+    const user = userEvent.setup()
+    renderWithProviders(<SystemPage />)
+    await user.click(screen.getByRole('tab', { name: '平台配置（只读）' }))
+
+    const table = await screen.findByRole('table', { name: '配置来源' })
+    expect(within(table).getAllByRole('columnheader').map((header) => header.textContent)).toEqual(['配置项', '文件生效值', '来源'])
+    expect(within(table).getAllByRole('row')).toHaveLength(21)
+    expect(screen.getByText('第 1 / 2 页 · 共 25 条')).toBeInTheDocument()
+    expect(within(table).getByText('limits.item20')).toBeInTheDocument()
+    expect(within(table).queryByText('limits.item21')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '下一页' }))
+    expect(screen.getByText('第 2 / 2 页 · 共 25 条')).toBeInTheDocument()
+    expect(within(screen.getByRole('table', { name: '配置来源' })).getAllByRole('row')).toHaveLength(6)
+    expect(screen.getByText('limits.item25')).toBeInTheDocument()
+    expect(screen.queryByText('limits.item20')).not.toBeInTheDocument()
   })
 })

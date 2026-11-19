@@ -8,19 +8,6 @@
   font-weight: var(--fw-semibold);
 }
 
-.command {
-  font-family: var(--font-mono);
-  font-size: var(--fs-meta);
-  overflow-wrap: anywhere;
-}
-
-.rowActions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: var(--space-sm);
-}
-
 .rowActionsEnd {
   display: flex;
   flex-wrap: wrap;
@@ -45,7 +32,8 @@
   text-align: left;
 }
 
-.detailRow td {
+/* Expansion row under an MCP server: the cell carries the tint. */
+.detailCell {
   background: var(--surface-2);
 }
 
@@ -111,10 +99,6 @@
   align-items: center;
   gap: var(--space-sm);
   margin-top: auto;
-}
-
-.mcpTable {
-  min-width: 860px;
 }
 
 /* Restore default bindings: a narrow action bar above the binding matrix. */
@@ -308,14 +292,57 @@
   font-size: var(--fs-label);
 }
 
-.toolTable {
-  min-width: 520px;
+/* The shared table styles let badges wrap, which splits a two-character status
+   label in a narrow column; keep the label whole so the column leaves room for it. */
+.statusText {
+  white-space: nowrap;
 }
 
 .toolBadges {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2xs);
+}
+
+/* Block binding matrix. The column count follows the data, so the matrix
+   scrolls sideways inside its own container instead of overflowing the page;
+   it never scrolls vertically. Cell alignment is set on inner wrappers because
+   the shared table styles own th/td alignment. */
+.matrixScroll {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+
+.matrixHead {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 17ch;
+  padding-block: var(--space-xs);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-weight: var(--fw-medium);
+  text-align: center;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.matrixRowName {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-medium);
+  color: var(--text);
+}
+
+.matrixToggle {
+  display: block;
+  margin-inline: auto;
 }
 
 .matrixLocked {

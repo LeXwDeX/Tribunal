@@ -313,12 +313,6 @@ a.listMeta {
   font-variant-numeric: tabular-nums;
 }
 
-.findingsTable {
-  min-width: 980px;
-}
-
-
-
 .findingBody {
   display: flex;
   flex-direction: column;
@@ -364,19 +358,6 @@ a.listMeta {
 .annotationControls .chip:disabled {
   opacity: 0.55;
 }
-
-.expandButton {
-  min-height: var(--control-h);
-  padding: 0 var(--space-md);
-  border: 1px solid transparent;
-  border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--link);
-  font-size: var(--fs-meta);
-  transition: background-color var(--dur-fast) var(--ease);
-}
-
-.expandButton:hover { background: var(--surface-2); }
 
 .drawerSection {
   display: flex;
@@ -534,54 +515,6 @@ a.listMeta {
   flex-direction: column;
   gap: var(--space-sm);
   min-width: 0;
-}
-
-.matrixWrap {
-  width: 100%;
-  overflow-x: auto;
-}
-
-.matrix {
-  width: 100%;
-  min-width: 760px;
-  border-collapse: collapse;
-  font-size: var(--fs-body-sm);
-}
-
-.matrix th,
-.matrix td {
-  padding: var(--space-sm);
-  border-bottom: 1px solid var(--border);
-  text-align: center;
-}
-
-.matrix th {
-  background: transparent;
-}
-
-.matrix tbody tr:last-child td {
-  border-bottom: 1px solid var(--border);
-}
-
-.matrix thead th {
-  color: var(--muted);
-  font-weight: var(--fw-medium);
-  font-size: var(--fs-micro);
-  font-family: var(--font-mono);
-  white-space: nowrap;
-}
-
-.matrix thead th:first-child {
-  text-align: left;
-}
-
-.matrix tbody th {
-  text-align: left;
-  font-family: var(--font-mono);
-  font-size: var(--fs-meta);
-  font-weight: var(--fw-medium);
-  white-space: nowrap;
-  color: var(--text);
 }
 
 .matrixCell {
