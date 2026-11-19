@@ -310,6 +310,11 @@ type principal struct {
 	// bootstrapBearer marks the static bootstrap token from the environment.
 	// It is platform administration only and cannot write configuration.
 	bootstrapBearer bool
+	// streamAuthEpoch is the stream-auth invalidation epoch sampled before
+	// this request authenticated. The review stream reuses the request
+	// authentication only when the epoch has not moved since; see apiAuth and
+	// handleReviewStream.
+	streamAuthEpoch uint64
 }
 
 const principalKey contextKey = requestIDKey + 1
@@ -868,6 +873,11 @@ func bearerValue(r *http.Request) string {
 // CSRF token.
 func (s *Server) apiAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Sample the stream-auth epoch before authentication. The review
+		// stream may reuse this request's authentication, and compare-then-set
+		// on this sample keeps a revocation that lands during authentication
+		// from being mistaken for a version the request verified.
+		authEpoch := s.streamAuthEpoch.Load()
 		value, failure := s.authenticateWithFailure(r)
 		if failure != authFailureNone {
 			w.Header().Set("WWW-Authenticate", "Bearer")
@@ -897,6 +907,7 @@ func (s *Server) apiAuth(next http.HandlerFunc) http.HandlerFunc {
 				return
 			}
 		}
+		value.streamAuthEpoch = authEpoch
 		ctx := context.WithValue(r.Context(), principalKey, value)
 		next(w, r.WithContext(ctx))
 	}

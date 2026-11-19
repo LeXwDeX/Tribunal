@@ -316,10 +316,13 @@ func (s *Server) handleReviewStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Authentication just ran in apiAuth; remember it instead of repeating the
-	// full check on the first tick. A revocation bumps the epoch and forces the
-	// next poll to re-authenticate.
+	// full check on the first tick. apiAuth sampled the epoch before it
+	// authenticated, so the result is reusable only while the epoch is still
+	// that sample: if a revocation raced the request, adopt neither the new
+	// epoch nor the request's authentication and re-check on the first poll.
 	verifiedAt := s.now()
 	authEpoch := s.streamAuthEpoch.Load()
+	forceReauth := value.streamAuthEpoch != authEpoch
 	controller := http.NewResponseController(w)
 	// Clear the server write deadline for this long-lived response; the
 	// request context, server shutdown, and terminal workflow state end the
@@ -371,12 +374,13 @@ func (s *Server) handleReviewStream(w http.ResponseWriter, r *http.Request) {
 			// by this server invalidated it: a revoked session or API token, a
 			// disabled user, or a removed grant closes an open stream.
 			epoch := s.streamAuthEpoch.Load()
-			if epoch != authEpoch || s.now().Sub(verifiedAt) >= s.streamAuthTTL {
+			if forceReauth || epoch != authEpoch || s.now().Sub(verifiedAt) >= s.streamAuthTTL {
 				if !s.streamStillAuthorized(r, snapshot.projectID) {
 					return
 				}
 				verifiedAt = s.now()
 				authEpoch = epoch
+				forceReauth = false
 			}
 			next, err := s.loadStreamSnapshot(r.Context(), wfID, snapshot)
 			if err != nil {
