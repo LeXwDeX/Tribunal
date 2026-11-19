@@ -870,10 +870,10 @@ func (s *ReviewService) publishPendingItem(ctx context.Context, item store.Pendi
 		}
 		err = s.publisher.publishFailureLocked(ctx, item.WorkflowID, reviewExecutionFailedReason)
 	case string(dag.WorkflowCompleted):
-		if _, _, err := s.startRepublishStatus(ctx, item.WorkflowID); err != nil {
+		if _, _, err := s.startRepublishStatus(ctx, item.WorkflowID, true); err != nil {
 			return false, err
 		}
-		err = s.publisher.publishLocked(ctx, item.WorkflowID)
+		err = s.publisher.publishPendingLocked(ctx, item.WorkflowID)
 	default:
 		return false, nil
 	}

@@ -270,6 +270,17 @@ func (p *Publisher) Publish(ctx context.Context, workflowID string) error {
 
 // publishLocked requires the project workspace read lock.
 func (p *Publisher) publishLocked(ctx context.Context, workflowID string) error {
+	return p.publishLockedIf(ctx, workflowID, false)
+}
+
+// publishPendingLocked requires the project workspace read lock. It publishes
+// only while the stored publication state is still pending, so a periodic scan
+// cannot republish a review that completed after the scan listed it (#584).
+func (p *Publisher) publishPendingLocked(ctx context.Context, workflowID string) error {
+	return p.publishLockedIf(ctx, workflowID, true)
+}
+
+func (p *Publisher) publishLockedIf(ctx context.Context, workflowID string, pendingOnly bool) error {
 	mrUnlock, err := p.lockReviewMR(ctx, workflowID)
 	if err != nil {
 		return err
@@ -280,6 +291,15 @@ func (p *Publisher) publishLocked(ctx context.Context, workflowID string) error 
 		return err
 	}
 	defer unlock()
+	if pendingOnly {
+		record, err := p.store.GetWorkflowDossier(ctx, workflowID)
+		if err != nil {
+			return err
+		}
+		if record == nil || record.PublicationState != store.WorkflowPublicationPending {
+			return nil
+		}
+	}
 	if rejected, unknown, err := p.rejectRepositorySkillPublicationLocked(ctx, p.store, workflowID); rejected || err != nil {
 		return repositorySkillPublicationError(unknown, err)
 	}
@@ -323,7 +343,9 @@ func (p *Publisher) recordPublicationFailure(ctx context.Context, workflowID str
 			reason = "merge request is not available"
 		}
 	}
-	if err := p.store.SetWorkflowPublicationState(ctx, workflowID, state, reason); err != nil {
+	// Never downgrade a published outcome: a duplicate attempt that raced the
+	// successful publication may fail here, but the review is already visible.
+	if err := p.store.SetWorkflowPublicationStateUnlessPublished(ctx, workflowID, state, reason); err != nil {
 		p.logger.Warn("publication state update failed",
 			"workflow_id", workflowID, "state", state, "error_class", errclass.Of(err))
 		return err
