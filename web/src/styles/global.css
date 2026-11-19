@@ -24,7 +24,6 @@ body {
   line-height: var(--lh-normal);
   -webkit-font-smoothing: antialiased;
   overflow-x: hidden;
-  font-feature-settings: "cv11", "ss01";
 }
 
 #root {
@@ -46,8 +45,8 @@ a {
   text-underline-offset: 3px;
 }
 
+/* Links read as body text; only the underline marks the hover state. */
 a:hover {
-  color: var(--accent-hover);
   text-decoration: underline;
 }
 
@@ -67,7 +66,6 @@ button:disabled {
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-  border-radius: var(--space-2xs);
 }
 
 ::selection {
@@ -157,7 +155,7 @@ th {
   padding: var(--space-sm) var(--space-lg);
   text-align: left;
   font-size: var(--fs-meta);
-  font-weight: var(--fw-medium);
+  font-weight: var(--fw-regular);
   color: var(--muted);
   background: var(--surface-2);
   border-bottom: 1px solid var(--border);
@@ -165,7 +163,7 @@ th {
 }
 
 td {
-  padding: 11px var(--space-lg);
+  padding: var(--space-md) var(--space-lg);
   border-bottom: 1px solid var(--border);
   vertical-align: middle;
 }
@@ -186,6 +184,7 @@ td.right,
 th.right {
   text-align: right;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 td.nowrap {
@@ -200,15 +199,15 @@ td.nowrap {
 }
 
 .dataTable th {
-  padding: var(--space-sm) 10px;
-  font-weight: var(--fw-medium);
+  padding: var(--space-sm) var(--space-md);
+  font-weight: var(--fw-regular);
   color: var(--muted);
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
 
 .dataTable td {
-  padding: 10px;
+  padding: var(--space-md);
   border-bottom: 1px solid var(--border);
   vertical-align: top;
 }
@@ -253,13 +252,23 @@ td.nowrap {
   width: 100%;
   min-width: 0;
   min-height: var(--control-h);
-  padding: 10px var(--space-md);
   border: 1px solid var(--control-border);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
+  border-radius: var(--radius-md);
+  background: var(--control-bg);
   color: var(--text);
   outline: none;
   box-sizing: border-box;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
+}
+
+/* Single-line controls sit at the control height with horizontal padding
+   only, so the text centers itself; the textarea pads its own lines. */
+.input,
+.select {
+  height: var(--control-h);
+  padding: 0 var(--space-md);
 }
 
 .input::placeholder,
@@ -292,6 +301,7 @@ td.nowrap {
 }
 
 .input[type="file"] {
+  height: auto;
   padding-top: var(--space-sm);
   padding-bottom: var(--space-sm);
 }
@@ -320,6 +330,7 @@ td.nowrap {
 
 .textarea {
   min-height: 110px;
+  padding: var(--space-sm) var(--space-md);
   resize: vertical;
   line-height: 1.6;
 }
@@ -342,7 +353,7 @@ td.nowrap {
 .checkboxRow {
   display: inline-flex;
   align-items: center;
-  gap: 9px;
+  gap: var(--space-sm);
   min-height: var(--control-h);
   padding: 0 var(--space-2xs);
   cursor: pointer;

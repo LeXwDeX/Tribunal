@@ -7,7 +7,7 @@
   margin: 0 auto;
   padding: var(--space-2xl) var(--space-2xl) 64px;
   box-sizing: border-box;
-  animation: pageIn 180ms ease-out;
+  animation: pageIn var(--dur-base) var(--ease);
 }
 
 @keyframes pageIn {
@@ -57,14 +57,17 @@
   display: contents;
 }
 
+/* Buttons: one height, one radius, monochrome. The primary action inverts the
+   text color; danger is the only filled color. */
 .button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--space-xs);
+  gap: var(--space-sm);
+  height: var(--control-h);
   min-height: var(--control-h);
-  padding: 0 14px;
-  border-radius: var(--radius-sm);
+  padding: 0 var(--space-md);
+  border-radius: var(--radius-md);
   border: 1px solid transparent;
   font-family: inherit;
   font-size: var(--fs-body-sm);
@@ -72,11 +75,24 @@
   line-height: var(--lh-tight);
   text-decoration: none;
   white-space: nowrap;
-  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
+  transition:
+    color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
 }
 
 .button:hover {
   text-decoration: none;
+}
+
+.button:active:not(:disabled):not([aria-disabled="true"]) {
+  transform: scale(0.98);
+}
+
+/* The global focus rule rounds every focused element to the small radius. */
+.button:focus-visible {
+  border-radius: var(--radius-md);
 }
 
 .button:disabled,
@@ -85,26 +101,24 @@
 }
 
 .primary {
-  background: var(--accent);
-  color: var(--on-accent);
-  box-shadow: inset 0 1px 0 var(--on-accent-highlight), var(--shadow-sm);
+  background: var(--primary-bg);
+  color: var(--primary-fg);
 }
 
 .primary:hover:not(:disabled) {
-  background: var(--accent-hover);
-  color: var(--on-accent);
+  background: var(--primary-hover);
+  color: var(--primary-fg);
 }
 
 .secondary {
-  background: var(--surface);
+  background: var(--surface-3);
   border-color: var(--control-border);
   color: var(--text);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--raised-shadow);
 }
 
 .secondary:hover:not(:disabled) {
-  background: var(--surface-2);
-  border-color: var(--border-strong);
+  background: color-mix(in srgb, var(--text) 6%, var(--surface-3));
   color: var(--text);
 }
 
@@ -115,26 +129,24 @@
 }
 
 .ghost:hover:not(:disabled) {
-  background: var(--surface-3);
+  background: var(--surface-2);
   color: var(--text);
 }
 
 .danger {
-  background: var(--surface);
-  border-color: var(--control-border);
-  color: var(--danger-fg);
+  background: var(--danger-solid);
+  color: var(--on-danger-solid);
 }
 
 .danger:hover:not(:disabled) {
-  background: var(--danger-bg);
-  border-color: var(--danger-dot);
-  color: var(--danger-fg);
+  background: var(--danger-solid-hover);
+  color: var(--on-danger-solid);
 }
 
 .smallButton {
   min-height: 28px;
   height: 28px;
-  padding: 0 10px;
+  padding: 0 var(--space-sm);
   font-size: var(--fs-label);
 }
 
@@ -150,14 +162,16 @@
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* Status: a 6px square dot plus text in the semantic foreground. The tint is
+   low-contrast; there is no glow and no animation. */
 .badge {
   display: inline-flex;
   align-items: center;
   gap: var(--space-xs);
-  height: 22px;
+  height: 20px;
   max-width: 100%;
   padding: 0 var(--space-sm);
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   font-size: var(--fs-meta);
   font-weight: var(--fw-medium);
   line-height: 1;
@@ -171,9 +185,8 @@
   width: 6px;
   height: 6px;
   flex: none;
-  border-radius: 50%;
+  border-radius: 2px;
   background: currentColor;
-  opacity: 0.9;
 }
 
 .badgeOk { background: var(--ok-bg); color: var(--ok-fg); }
@@ -187,43 +200,67 @@
 .badgeNeutral { background: var(--neutral-bg); color: var(--neutral-fg); }
 .badgeNeutral::before { background: var(--neutral-dot); }
 
+/* Live state (running, refreshing) is accent-colored explicitly: the info tone
+   is neutral, so it no longer supplies cyan. The dot stays still. */
+.badgeLive {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
 .badgeLive::before {
-  animation: pulse 1.4s ease-in-out infinite;
+  background: var(--accent);
 }
 
 .badgePlain::before {
   display: none;
 }
 
-@keyframes pulse {
-  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--info-dot) 55%, transparent); }
-  50% { box-shadow: 0 0 0 4px transparent; }
-}
-
 .sev {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: var(--space-xs);
   min-width: 28px;
   height: 20px;
-  padding: 0 var(--space-xs);
-  border-radius: 4px;
-  font: 600 11.5px/1 var(--font-mono);
+  padding: 0 var(--space-sm);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-medium);
+  line-height: 1;
 }
 
-.sevP0 { background: var(--danger-solid); color: var(--on-danger-solid); }
-.sevP1 {
-  background: var(--danger-bg);
-  color: var(--danger-fg);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger-dot) 35%, transparent);
+.sev::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 2px;
+  background: currentColor;
 }
+
+.sevP0 {
+  background: var(--danger-bg);
+  border-color: color-mix(in srgb, var(--danger-dot) 40%, transparent);
+  color: var(--danger-fg);
+  font-weight: var(--fw-bold);
+}
+.sevP0::before { background: var(--danger-solid); }
+.sevP1 { background: var(--danger-bg); color: var(--danger-fg); }
+.sevP1::before { background: var(--danger-dot); }
 .sevP2 { background: var(--warn-bg); color: var(--warn-fg); }
+.sevP2::before { background: var(--warn-dot); }
 .sevInfo { background: var(--neutral-bg); color: var(--neutral-fg); }
+.sevInfo::before { background: var(--neutral-dot); }
 
 .sevCounts {
   display: inline-flex;
-  gap: 10px;
-  font: 500 12.5px var(--font-mono);
+  gap: var(--space-md);
+  font-family: var(--font-mono);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-medium);
+  font-variant-numeric: tabular-nums;
 }
 
 .sevCounts span {
@@ -233,8 +270,8 @@
 }
 
 .sevCounts i {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 2px;
   display: inline-block;
 }
@@ -248,13 +285,13 @@
   min-width: 0;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow-sm);
   overflow: visible;
   display: flex;
   flex-direction: column;
-  padding: 18px var(--space-xl);
-  gap: 14px;
+  padding: var(--space-lg) var(--space-xl);
+  gap: var(--space-lg);
 }
 
 .panelHeader {
@@ -263,6 +300,7 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--space-md);
+  min-height: 28px;
 }
 
 .panelTitle {
@@ -276,8 +314,10 @@
 
 .panelTitle small {
   color: var(--muted);
-  font-size: var(--fs-label);
+  font-family: var(--font-mono);
+  font-size: var(--fs-meta);
   font-weight: var(--fw-regular);
+  font-variant-numeric: tabular-nums;
 }
 
 .panelAside {
@@ -286,12 +326,12 @@
   align-items: center;
   gap: var(--space-sm);
   color: var(--muted);
-  font-size: var(--fs-label);
+  font-size: var(--fs-meta);
 }
 
 .panelBody {
   min-width: 0;
-  padding: var(--space-lg) 18px;
+  padding: var(--space-lg);
 }
 
 .panelFlush {
@@ -299,9 +339,12 @@
   gap: 0;
 }
 
+/* Vertical padding keeps a wrapped title off the top edge; the row gap keeps
+   the wrapped lines close, and align-items centers a single line. */
 .panelFlush > .panelHeader {
-  min-height: 52px;
-  padding: 14px 18px;
+  min-height: 48px;
+  padding: var(--space-xs) var(--space-lg);
+  row-gap: var(--space-sm);
   border-bottom: 1px solid var(--border);
 }
 
@@ -324,7 +367,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-sm);
   min-width: 0;
 }
 
@@ -332,14 +375,14 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-xs);
+  gap: var(--space-sm);
 }
 
 .pageTitle {
   margin: 0;
   font-size: var(--fs-h1);
-  font-weight: var(--fw-bold);
-  letter-spacing: -0.01em;
+  font-weight: var(--fw-semibold);
+  letter-spacing: var(--ls-tight);
 }
 
 .pageDescription {
@@ -354,12 +397,16 @@
   gap: var(--space-sm);
 }
 
+/* A metric strip is one panel with several cells. The cells are separated by
+   the 1px gaps, which show the panel's border color, so wrapped rows keep
+   their dividers without stray edge lines. */
 .metricStrip {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  background: var(--surface);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-px);
+  background: var(--border);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow-sm);
   overflow: hidden;
 }
@@ -369,36 +416,30 @@
   min-width: 0;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 14px 18px;
+  border-radius: var(--radius-lg);
+  padding: var(--space-lg) var(--space-xl);
   display: flex;
   flex-direction: column;
   gap: var(--space-2xs);
 }
 
 .metricStrip .metric {
-  flex: initial;
-  background: transparent;
+  flex: 1 1 160px;
   border: 0;
-  border-right: 1px solid var(--border);
   border-radius: 0;
 }
 
-.metricStrip .metric:last-child {
-  border-right: 0;
-}
-
 .metricLabel {
-  color: var(--muted);
-  font-size: var(--fs-meta);
+  color: var(--muted-strong);
+  font-size: var(--fs-label);
 }
 
 .metricValue {
-  font-size: var(--fs-h1);
-  height: 33px;
-  font-weight: var(--fw-bold);
+  min-height: calc(var(--fs-display) * var(--lh-tight));
+  font-family: var(--font-mono);
+  font-size: var(--fs-display);
+  font-weight: var(--fw-medium);
   line-height: var(--lh-tight);
-  letter-spacing: -0.01em;
   font-variant-numeric: tabular-nums;
   display: flex;
   align-items: baseline;
@@ -407,19 +448,17 @@
 
 .metricValue small {
   color: var(--muted);
-  font-size: 13px;
-  font-weight: var(--fw-medium);
+  font-size: var(--fs-label);
+  font-weight: var(--fw-regular);
 }
 
+/* The note explains the value, so a long one wraps instead of being cut. */
 .metricNote {
+  display: block;
   color: var(--muted);
   font-size: var(--fs-meta);
-  display: flex;
-  align-items: center;
-  gap: var(--space-xs);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .metricNote svg {
@@ -428,6 +467,7 @@
 
 .metricUnavailable {
   color: var(--muted);
+  font-family: var(--font-sans);
   font-size: var(--fs-h4);
   font-weight: var(--fw-medium);
 }
@@ -461,23 +501,28 @@
   gap: var(--space-sm);
   width: 100%;
   min-width: 0;
+  height: var(--control-h);
   min-height: var(--control-h);
-  padding: 10px var(--space-md);
+  padding: 0 var(--space-md);
   border: 1px solid var(--control-border);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
+  border-radius: var(--radius-md);
+  background: var(--control-bg);
   color: var(--text);
   font-size: var(--fs-body-sm);
   text-align: left;
   cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
 }
 
 .selectTrigger:hover:not(:disabled) {
-  border-color: var(--border-strong);
+  border-color: color-mix(in srgb, var(--text) 16%, var(--control-border));
 }
 
 .selectTrigger:focus-visible {
   border-color: var(--accent);
+  border-radius: var(--radius-md);
   box-shadow: 0 0 0 3px var(--accent-ring);
   outline: none;
 }
@@ -506,7 +551,7 @@
 .selectChevron {
   flex: 0 0 auto;
   color: var(--muted-strong);
-  transition: transform var(--dur-fast) ease;
+  transition: transform var(--dur-fast) var(--ease);
 }
 
 .selectTrigger[aria-expanded="true"] .selectChevron {
@@ -518,7 +563,7 @@
   z-index: calc(var(--z-modal) + 1);
   padding: var(--space-2xs);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--surface);
   color: var(--text);
   box-shadow: var(--shadow-md);
@@ -532,8 +577,8 @@
   align-items: center;
   gap: var(--space-sm);
   min-height: 32px;
-  padding: var(--space-xs) 10px;
-  border-radius: var(--space-2xs);
+  padding: var(--space-2xs) var(--space-md);
+  border-radius: var(--radius-sm);
   font-size: var(--fs-body-sm);
   cursor: pointer;
 }
@@ -563,7 +608,7 @@
 }
 
 .selectEmpty {
-  padding: var(--space-xs) 10px;
+  padding: var(--space-sm) var(--space-md);
   color: var(--muted);
   font-size: var(--fs-meta);
 }
@@ -573,7 +618,7 @@
 .checkbox {
   display: inline-flex;
   align-items: center;
-  gap: 9px;
+  gap: var(--space-sm);
   min-height: var(--control-h);
   padding: 0 var(--space-2xs);
   font-size: var(--fs-body-sm);
@@ -605,10 +650,13 @@
   height: 18px;
   flex: 0 0 auto;
   border: 1px solid var(--control-border);
-  border-radius: var(--space-2xs);
-  background: var(--surface);
+  border-radius: var(--radius-sm);
+  background: var(--control-bg);
   color: transparent;
-  transition: background-color var(--dur-fast) ease, border-color var(--dur-fast) ease, color var(--dur-fast) ease;
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
 }
 
 .checkboxInput:checked + .checkboxBox {
@@ -630,7 +678,7 @@
 .dateField {
   display: flex;
   flex-direction: column;
-  gap: var(--space-xs);
+  gap: var(--space-2xs);
   min-width: 0;
 }
 
@@ -641,7 +689,7 @@
 }
 
 .dateInputWrap .dateInput {
-  padding-right: 42px;
+  padding-right: 40px;
 }
 
 .dateButton {
@@ -651,18 +699,21 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: var(--space-2xs);
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted-strong);
   transform: translateY(-50%);
+  transition:
+    color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
 }
 
 .dateButton:hover:not(:disabled) {
-  background: var(--surface-3);
+  background: color-mix(in srgb, var(--text) 8%, transparent);
   color: var(--text);
 }
 
@@ -681,7 +732,7 @@
   z-index: calc(var(--z-modal) + 1);
   padding: var(--space-md);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--surface);
   color: var(--text);
   box-shadow: var(--shadow-md);
@@ -712,9 +763,12 @@
   height: 28px;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: var(--space-2xs);
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted-strong);
+  transition:
+    color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
 }
 
 .calendarNav:hover {
@@ -749,11 +803,15 @@
   height: 32px;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: var(--space-2xs);
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text);
   font-size: var(--fs-meta);
   font-variant-numeric: tabular-nums;
+  transition:
+    color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
 }
 
 .calendarDay:hover:not(:disabled) {
@@ -792,12 +850,15 @@
 
 .calendarAction {
   min-height: 28px;
-  padding: 0 10px;
+  padding: 0 var(--space-sm);
   border: 1px solid transparent;
-  border-radius: var(--space-2xs);
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted-strong);
   font-size: var(--fs-label);
+  transition:
+    color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
 }
 
 .calendarAction:hover {
@@ -830,14 +891,14 @@
 .searchIcon {
   position: absolute;
   top: 50%;
-  left: 10px;
+  left: var(--space-md);
   color: var(--muted);
   transform: translateY(-50%);
   pointer-events: none;
 }
 
 .searchField .searchInput {
-  padding-left: 34px;
+  padding-left: 36px;
   padding-right: 36px;
 }
 
@@ -854,18 +915,21 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted);
   transform: translateY(-50%);
+  transition:
+    color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
 }
 
 .searchClear:hover {
-  background: var(--surface-3);
+  background: color-mix(in srgb, var(--text) 8%, transparent);
   color: var(--text);
 }
 
@@ -885,7 +949,7 @@
      makes offsetWidth/offsetHeight from the first measurement final. */
   width: max-content;
   max-width: min(280px, calc(100vw - 16px));
-  padding: var(--space-xs) 10px;
+  padding: var(--space-2xs) var(--space-sm);
   border-radius: var(--radius-sm);
   background: var(--text);
   color: var(--surface);
@@ -924,7 +988,7 @@
 .disclosureChevron {
   flex: 0 0 auto;
   color: var(--muted);
-  transition: transform var(--dur-fast) ease;
+  transition: transform var(--dur-fast) var(--ease);
 }
 
 .disclosure[open] > .disclosureSummary .disclosureChevron {
@@ -939,7 +1003,7 @@
 .field {
   display: flex;
   flex-direction: column;
-  gap: var(--space-xs);
+  gap: var(--space-sm);
   min-width: 0;
 }
 
@@ -965,11 +1029,11 @@
 .note {
   display: flex;
   align-items: flex-start;
-  gap: var(--space-xs);
+  gap: var(--space-sm);
   min-width: 0;
-  padding: 10px var(--space-md);
+  padding: var(--space-sm) var(--space-md);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--surface-2);
   color: var(--text);
   font-size: var(--fs-meta);
@@ -1011,7 +1075,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-xs);
+  gap: var(--space-sm);
   min-width: 0;
   min-height: 18px;
   color: var(--muted);
@@ -1020,7 +1084,7 @@
 }
 
 .toolbarStatusInset {
-  padding: 0 18px;
+  padding: 0 var(--space-lg);
 }
 
 .errorText {
@@ -1033,7 +1097,7 @@
   flex-direction: column;
   align-items: center;
   gap: var(--space-2xs);
-  padding: 36px 18px;
+  padding: var(--space-3xl) var(--space-lg);
   color: var(--muted);
   text-align: center;
 }
@@ -1047,22 +1111,22 @@
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 10px;
-  padding: 14px var(--space-lg);
+  gap: var(--space-sm);
+  padding: var(--space-md) var(--space-lg);
   border: 1px solid color-mix(in srgb, var(--danger-fg) 30%, transparent);
   background: var(--danger-bg);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   color: var(--danger-fg);
-  font-size: 13px;
+  font-size: var(--fs-body-sm);
 }
 
 .loading {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-sm);
   color: var(--muted);
-  padding: 22px var(--space-2xs);
-  font-size: 13px;
+  padding: var(--space-xl) var(--space-2xs);
+  font-size: var(--fs-body-sm);
 }
 
 .toolbar {
@@ -1070,7 +1134,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-sm);
-  padding: var(--space-md) 18px;
+  padding: var(--space-md) var(--space-lg);
   border-bottom: 1px solid var(--border);
   background: var(--surface);
 }
@@ -1079,6 +1143,8 @@
   flex: 0 1 200px;
 }
 
+/* Tabs: the selected tab is marked by a text-colored underline, so the accent
+   color stays reserved for live state and focus. */
 .tabs {
   display: flex;
   gap: var(--space-2xs);
@@ -1089,6 +1155,8 @@
 
 .tab {
   position: relative;
+  /* A scrolling strip must not shrink its tabs, or their labels overlap. */
+  flex: none;
   height: 40px;
   padding: 0 var(--space-md);
   border: 0;
@@ -1097,6 +1165,7 @@
   font-family: inherit;
   font-size: var(--fs-body-sm);
   white-space: nowrap;
+  transition: color var(--dur-fast) var(--ease);
 }
 
 .tab:hover {
@@ -1116,55 +1185,69 @@
 .tabActive::after {
   content: "";
   position: absolute;
-  left: 8px;
-  right: 8px;
+  left: var(--space-sm);
+  right: var(--space-sm);
   bottom: -1px;
   height: 2px;
   border-radius: 2px;
-  background: var(--accent);
+  background: var(--text);
 }
 
 .tabCount {
-  margin-left: var(--space-xs);
+  margin-left: var(--space-sm);
   padding: var(--space-px) var(--space-xs);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: var(--surface-3);
   color: var(--muted);
+  font-family: var(--font-mono);
   font-size: var(--fs-caption);
+  font-variant-numeric: tabular-nums;
 }
 
+/* Segmented: a recessed track with a raised selected segment. The track is
+   8px and the segment 6px, so the inner radius follows the 2px inset. */
 .segmented {
   display: inline-flex;
   gap: 2px;
   padding: 2px;
-  border-radius: 8px;
-  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
 }
 
 .segmented button {
   display: inline-flex;
   align-items: center;
   gap: var(--space-xs);
-  height: 28px;
-  padding: 0 10px;
+  height: 30px;
+  padding: 0 var(--space-md);
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted-strong);
   font-size: var(--fs-label);
+  transition:
+    color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
+}
+
+.segmented button:hover:not([aria-pressed="true"]) {
+  color: var(--text);
 }
 
 .segmented button[aria-pressed="true"] {
-  background: var(--surface);
+  background: var(--surface-3);
   color: var(--text);
   font-weight: var(--fw-medium);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--raised-shadow);
 }
 
 .segmented em {
   font-style: normal;
   color: var(--muted);
+  font-family: var(--font-mono);
   font-size: var(--fs-caption);
+  font-variant-numeric: tabular-nums;
 }
 
 .inlineLink {
@@ -1172,7 +1255,7 @@
   align-items: center;
   gap: var(--space-2xs);
   min-height: var(--control-h);
-  font-size: 13px;
+  font-size: var(--fs-body-sm);
 }
 
 
@@ -1237,7 +1320,7 @@
   min-height: var(--control-h);
   cursor: pointer;
   color: var(--muted-strong);
-  font-size: 13px;
+  font-size: var(--fs-body-sm);
 }
 
 .jsonBlock {
@@ -1245,7 +1328,7 @@
   padding: var(--space-md);
   background: var(--surface-2);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   color: var(--text);
   max-height: 360px;
   overflow: auto;
@@ -1266,11 +1349,11 @@
 .inlineList {
   display: inline-flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: var(--space-md);
 }
 
 .tableNote {
-  padding: 10px 18px;
+  padding: var(--space-sm) var(--space-lg);
   border-top: 1px solid var(--border);
   background: var(--surface-2);
   color: var(--muted);
@@ -1281,7 +1364,7 @@
    their content instead of adding a second inset or full-bleed background. */
 .panelNote {
   margin: 0;
-  padding: 10px 0 0;
+  padding: var(--space-md) 0 0;
   border-top: 1px solid var(--border);
   color: var(--muted);
   font-size: var(--fs-meta);
@@ -1306,7 +1389,7 @@
   justify-content: center;
   padding: var(--space-2xl);
   background: var(--overlay);
-  animation: fade 150ms ease-out;
+  animation: fade var(--dur-fast) var(--ease);
 }
 
 .drawerOverlay {
@@ -1319,13 +1402,15 @@
   display: flex;
   justify-content: flex-end;
   background: var(--overlay);
-  animation: fade 150ms ease-out;
+  animation: fade var(--dur-fast) var(--ease);
 }
 
 @keyframes fade {
   from { opacity: 0; }
 }
 
+/* Dialog: the outermost surface takes the large radius; controls inside keep
+   the medium one. */
 .modal {
   width: min(620px, 100%);
   max-height: calc(100vh - 48px);
@@ -1333,6 +1418,7 @@
   scrollbar-gutter: stable both-edges;
   background: var(--surface);
   color: var(--text);
+  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-modal);
   display: flex;
@@ -1349,7 +1435,7 @@
   box-shadow: var(--shadow-modal);
   display: flex;
   flex-direction: column;
-  animation: slideIn 200ms ease-out;
+  animation: slideIn var(--dur-drawer) var(--ease);
 }
 
 @keyframes slideIn {
@@ -1369,19 +1455,19 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-md);
-  padding: 18px 22px;
+  padding: var(--space-lg) var(--space-xl);
   border-bottom: 1px solid var(--border);
 }
 
 .modalTitle {
   font-size: var(--fs-h3);
-  font-weight: var(--fw-bold);
+  font-weight: var(--fw-semibold);
 }
 
 .modalDescription {
   margin-top: var(--space-2xs);
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--fs-body-sm);
 }
 
 .modalBody {
@@ -1397,7 +1483,7 @@
   min-width: 0;
   overflow: auto;
   scrollbar-gutter: stable both-edges;
-  padding: 18px 22px;
+  padding: var(--space-lg) var(--space-xl);
   display: flex;
   flex-direction: column;
   gap: var(--space-xl);
@@ -1408,7 +1494,7 @@
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: var(--space-sm);
-  padding: 14px var(--space-2xl);
+  padding: var(--space-md) var(--space-2xl);
   border-top: 1px solid var(--border);
   background: var(--surface-2);
 }
@@ -1418,7 +1504,7 @@
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: var(--space-sm);
-  padding: 14px 22px;
+  padding: var(--space-md) var(--space-xl);
   border-top: 1px solid var(--border);
   background: var(--surface-2);
 }
@@ -1431,9 +1517,16 @@
   height: var(--control-h);
   flex: 0 0 auto;
   border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--muted);
+  transition:
+    color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
+}
+
+.iconButton:focus-visible {
+  border-radius: var(--radius-md);
 }
 
 .iconButton:hover {
@@ -1456,8 +1549,8 @@
 
 .toastRegion {
   position: fixed;
-  right: 20px;
-  bottom: 20px;
+  right: var(--space-xl);
+  bottom: var(--space-xl);
   z-index: var(--z-toast);
   display: flex;
   flex-direction: column;
@@ -1468,15 +1561,15 @@
 .toast {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
   border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--text);
   color: var(--surface);
   box-shadow: var(--shadow-md);
-  font-size: 13px;
-  animation: pageIn 200ms ease-out;
+  font-size: var(--fs-body-sm);
+  animation: pageIn var(--dur-drawer) var(--ease);
 }
 
 .toast .iconButton {
@@ -1493,10 +1586,11 @@
 
 .codeBlock {
   margin: 0;
-  padding: var(--space-md) 14px;
+  padding: var(--space-md) var(--space-lg);
   background: var(--code-bg);
   color: var(--code-fg);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   font-family: var(--font-mono);
   font-size: var(--fs-label);
   line-height: var(--lh-relaxed);
@@ -1510,13 +1604,14 @@
   width: 32px;
   height: 32px;
   flex: 0 0 auto;
+  border: 1px solid var(--border);
   border-radius: 50%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: var(--nav-active);
-  color: var(--nav-text);
-  font-weight: 700;
+  background: var(--surface-3);
+  color: var(--muted-strong);
+  font-weight: var(--fw-bold);
 }
 
 
@@ -1527,7 +1622,7 @@
   display: grid;
   grid-template-columns: fit-content(40%) minmax(0, 1fr);
   align-items: start;
-  gap: 10px 18px;
+  gap: var(--space-md) var(--space-lg);
   font-size: var(--fs-body-sm);
 }
 
@@ -1566,6 +1661,7 @@
   height: 20px;
   border-radius: 999px;
   background: var(--muted);
+  transition: background-color var(--dur-fast) var(--ease);
 }
 
 .switch::after {
@@ -1577,7 +1673,7 @@
   height: 16px;
   border-radius: 50%;
   background: var(--surface);
-  transition: transform 140ms ease;
+  transition: transform var(--dur-fast) var(--ease);
 }
 
 .switchOn::before {
@@ -1602,16 +1698,13 @@
 
 @media (max-width: 900px) {
   .page {
-    padding: 18px var(--space-lg) var(--space-4xl);
+    padding: var(--space-lg) var(--space-lg) var(--space-4xl);
   }
   .panel {
     padding: var(--space-lg);
   }
-  .metricStrip .metric {
-    border-bottom: 1px solid var(--border);
-  }
   .panelBody {
-    padding: 14px var(--space-lg);
+    padding: var(--space-md) var(--space-lg);
   }
   .panelFlush {
     padding: 0;
@@ -1622,7 +1715,6 @@
   }
   .modal {
     max-height: calc(100vh - 24px);
-    border-radius: var(--radius-md);
   }
   .drawer {
     width: 100%;
@@ -1637,9 +1729,9 @@
     min-width: 0;
   }
   .toastRegion {
-    left: 12px;
-    right: 12px;
-    bottom: 12px;
+    left: var(--space-md);
+    right: var(--space-md);
+    bottom: var(--space-md);
     width: auto;
   }
   .toolbar .field,

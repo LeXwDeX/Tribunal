@@ -4,7 +4,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-xs);
+  gap: var(--space-sm);
   font-weight: var(--fw-semibold);
 }
 
@@ -18,14 +18,14 @@
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: var(--space-xs);
+  gap: var(--space-sm);
 }
 
 .rowActionsEnd {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: var(--space-xs);
+  gap: var(--space-sm);
   margin-left: auto;
 }
 
@@ -58,12 +58,12 @@
 .skillCard {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-md);
   min-width: 0;
-  padding: var(--space-lg) 18px;
+  padding: var(--space-lg);
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow-sm);
 }
 
@@ -78,7 +78,7 @@
 .skillName {
   font-family: var(--font-mono);
   font-weight: var(--fw-semibold);
-  font-size: 14.5px;
+  font-size: var(--fs-h4);
 }
 
 .skillDescription {
@@ -90,7 +90,7 @@
 .skillMeta {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: var(--space-2xs) 10px;
+  gap: var(--space-2xs) var(--space-md);
   margin: 0;
   font-size: var(--fs-meta);
 }
@@ -124,7 +124,7 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--space-md);
-  padding: var(--space-md) 14px;
+  padding: var(--space-md);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--surface-2);
@@ -142,7 +142,7 @@
 .restoreTitle {
   color: var(--text);
   font-weight: var(--fw-semibold);
-  font-size: 13px;
+  font-size: var(--fs-body-sm);
 }
 
 .restoreWarning {
@@ -159,8 +159,8 @@
 
 .restoreRestart {
   margin: 0;
-  padding: 9px 11px;
-  border-radius: var(--radius-sm);
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
   background: var(--warn-bg);
   color: var(--warn-fg);
   font-size: var(--fs-label);
@@ -169,12 +169,12 @@
 .restoreChanges {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-md);
 }
 
 .restoreBlock {
   min-width: 0;
-  padding: var(--space-md) 14px;
+  padding: var(--space-md);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--surface);
@@ -191,7 +191,7 @@
 .restoreBlockTitle {
   margin: 0;
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--fs-body-sm);
   font-weight: var(--fw-semibold);
   overflow-wrap: anywhere;
 }
@@ -222,15 +222,15 @@
 .restoreGroup {
   display: flex;
   flex-direction: column;
-  gap: var(--space-xs);
+  gap: var(--space-2xs);
   min-width: 0;
 }
 
 .restoreGroups {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 10px var(--space-lg);
-  margin-top: 10px;
+  gap: var(--space-md) var(--space-lg);
+  margin-top: var(--space-md);
 }
 
 .restoreGroupTitle {
@@ -238,7 +238,6 @@
   color: var(--muted);
   font-size: var(--fs-micro);
   font-weight: var(--fw-semibold);
-  letter-spacing: 0.02em;
 }
 
 .restoreList {
@@ -337,7 +336,7 @@
 .importList {
   display: flex;
   flex-direction: column;
-  gap: var(--space-xs);
+  gap: var(--space-sm);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -352,7 +351,7 @@
   min-width: 0;
   padding: var(--space-sm) var(--space-md);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--surface);
 }
 

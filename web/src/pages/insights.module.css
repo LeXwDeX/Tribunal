@@ -57,7 +57,7 @@
 
 .rowHint {
   display: block;
-  margin-top: var(--space-xs);
+  margin-top: var(--space-2xs);
   text-align: right;
   font-size: var(--fs-label);
   color: var(--muted);
@@ -102,7 +102,7 @@
 .cardTitle {
   font-family: var(--font-mono);
   font-weight: var(--fw-semibold);
-  font-size: 14.5px;
+  font-size: var(--fs-h4);
   overflow-wrap: anywhere;
 }
 
@@ -129,13 +129,13 @@
   gap: var(--space-px);
   background: var(--border);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   overflow: hidden;
 }
 
 .cardStats li {
   background: var(--surface-2);
-  padding: var(--space-sm) 10px;
+  padding: var(--space-sm) var(--space-md);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -148,7 +148,7 @@
 }
 
 .cardStats b {
-  font: 600 13.5px var(--font-mono);
+  font: var(--fw-semibold) var(--fs-body-sm) var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
 
@@ -189,12 +189,12 @@
   padding: var(--space-md);
   min-width: 0;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
 }
 
 .modelFormLegend {
-  padding: 0 var(--space-xs);
-  font: 600 var(--fs-label) var(--font-mono);
+  padding: 0 var(--space-2xs);
+  font: var(--fw-semibold) var(--fs-label) var(--font-mono);
 }
 
 .modelFormGrid {
@@ -207,7 +207,7 @@
 .presetBlock {
   display: flex;
   flex-direction: column;
-  gap: var(--space-xs);
+  gap: var(--space-sm);
   min-width: 0;
 }
 
@@ -266,7 +266,7 @@
 .profileMeta {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2xs) 14px;
+  gap: var(--space-2xs) var(--space-lg);
   color: var(--muted);
   font-size: var(--fs-label);
 }
@@ -278,16 +278,16 @@
   display: flex;
   flex-wrap: wrap;
   align-items: stretch;
-  gap: var(--space-sm) 22px;
+  gap: var(--space-sm) var(--space-2xl);
 }
 
 .profileStep {
   position: relative;
   min-width: 96px;
   max-width: 100%;
-  padding: var(--space-sm) 10px;
+  padding: var(--space-sm) var(--space-md);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--surface-2);
   display: flex;
   flex-direction: column;
@@ -301,17 +301,18 @@
   top: 50%;
   transform: translateY(-50%);
   color: var(--muted);
-  font-size: 16px;
+  font-size: var(--fs-h3);
   line-height: 1;
 }
 
 .profileStepN { font-size: var(--fs-micro); color: var(--muted); }
 .profileStepWhat { font-size: var(--fs-label); font-weight: var(--fw-medium); overflow-wrap: anywhere; }
-.profileStepWho { font: 500 12px var(--font-mono); color: var(--link); overflow-wrap: anywhere; }
+.profileStepWho { font: var(--fw-medium) var(--fs-meta) var(--font-mono); color: var(--link); overflow-wrap: anywhere; }
 
 .budget {
   font-family: var(--font-mono);
   font-size: var(--fs-meta);
+  font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
 
@@ -361,7 +362,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-sm);
 }
 
 .chartWrap {
@@ -376,6 +377,7 @@
   overflow: visible;
 }
 
+/* One series: the only chart color that keeps the accent. */
 .chart rect {
   fill: var(--accent);
 }
@@ -401,13 +403,14 @@
   white-space: nowrap;
   text-align: center;
   color: var(--muted);
-  font: 11px var(--font-mono);
+  font: var(--fs-meta) var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 14px;
+  gap: var(--space-lg);
   font-size: var(--fs-meta);
   color: var(--muted);
 }
@@ -415,12 +418,12 @@
 .legend span {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-xs);
+  gap: var(--space-sm);
 }
 
 .legend i {
-  width: 9px;
-  height: 9px;
+  width: 8px;
+  height: 8px;
   border-radius: 2px;
   display: inline-block;
   background: var(--accent);
@@ -429,7 +432,7 @@
 .trendCaption {
   caption-side: top;
   text-align: left;
-  padding: 0 14px var(--space-sm);
+  padding: 0 var(--space-md) var(--space-sm);
   color: var(--muted);
 }
 
@@ -446,22 +449,24 @@
 }
 
 .ratioBar {
-  height: 5px;
-  border-radius: 3px;
+  height: 4px;
+  border-radius: 2px;
   background: var(--surface-3);
   overflow: hidden;
 }
 
+/* Many ratio bars share a page, so the fill stays neutral. */
 .ratioFill {
   display: block;
   height: 100%;
-  background: var(--accent);
-  border-radius: 3px;
+  background: var(--muted);
+  border-radius: 2px;
 }
 
 .ratio small {
   color: var(--muted);
-  font: 11.5px var(--font-mono);
+  font: var(--fs-meta) var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .ratioEmpty {
@@ -471,7 +476,7 @@
 .signals {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-xs) var(--space-sm);
+  gap: var(--space-sm);
 }
 
 /* --- 系统 --- */
@@ -480,7 +485,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
-  gap: 10px;
+  gap: var(--space-md);
 }
 
 .grantPicker .field {
@@ -491,15 +496,15 @@
 .field {
   display: flex;
   flex-direction: column;
-  gap: var(--space-xs);
+  gap: var(--space-sm);
   min-width: 0;
 }
 
 .flushSection {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 14px 18px var(--space-md);
+  gap: var(--space-md);
+  padding: var(--space-lg) var(--space-lg) var(--space-md);
   border-top: 1px solid var(--border);
 }
 
