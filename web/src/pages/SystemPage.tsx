@@ -739,13 +739,11 @@ function AdminUsersPanel() {
           <DataTable label="用户与账号" minWidth="xl">
             <thead>
               <tr>
-                <th scope="col">用户名</th>
-                <th scope="col">显示名</th>
+                <th scope="col">用户</th>
                 <th scope="col">角色</th>
                 <th scope="col">全局模式</th>
                 <th scope="col" className={tableCell.num}>项目授权数</th>
-                <th scope="col">状态</th>
-                <th scope="col">最近登录</th>
+                <th scope="col">状态 / 最近登录</th>
                 <th scope="col" className={tableCell.actions}>操作</th>
               </tr>
             </thead>
@@ -759,8 +757,12 @@ function AdminUsersPanel() {
                   : self ? '不能停用当前登录账号，请使用其他管理员账号操作。' : null
                 return (
                   <tr key={user.id}>
-                    <td className={tableCell.mono}>{user.username}</td>
-                    <td>{user.name || '—'}</td>
+                    <td>
+                      <span className={drawer.userCell}>
+                        {user.name ? <span>{user.name}</span> : null}
+                        <span className={drawer.userName}>{user.username}</span>
+                      </span>
+                    </td>
                     <td>
                       {user.role ? (
                         <span className={drawer.roleCell}>
@@ -771,20 +773,25 @@ function AdminUsersPanel() {
                     </td>
                     <td className={tableCell.nowrap}>{user.global_read == null ? '—' : user.global_read ? '已开启' : '未开启'}</td>
                     <td className={tableCell.num}>{admin ? '全部' : user.grant_count == null ? '—' : formatNumber(user.grant_count)}</td>
-                    <td><Badge tone={user.disabled ? 'danger' : 'ok'}>{user.disabled ? '已停用' : '启用'}</Badge></td>
-                    <td className={tableCell.nowrap}>{user.last_login_at ? formatDate(user.last_login_at) : '从未登录'}</td>
+                    <td>
+                      <span className={drawer.userCell}>
+                        <span><Badge tone={user.disabled ? 'danger' : 'ok'}>{user.disabled ? '已停用' : '启用'}</Badge></span>
+                        <span className={drawer.lastLogin}>{user.last_login_at ? formatDate(user.last_login_at) : '从未登录'}</span>
+                      </span>
+                    </td>
                     <td className={tableCell.actions}>
                       <TableActions>
                         <TableAction onClick={() => setManageTargetId(user.id)}>管理</TableAction>
                         <Tooltip content={disableReason}>
                           <TableAction
+                            aria-label={user.disabled ? '启用账号' : '停用账号'}
                             aria-disabled={disableBlocked || undefined}
                             onClick={() => { if (!disableBlocked) setDisableTarget(user) }}
                           >
-                            {user.disabled ? '启用账号' : '停用账号'}
+                            {user.disabled ? '启用' : '停用'}
                           </TableAction>
                         </Tooltip>
-                        <TableAction tone="danger" onClick={() => setRevokeTarget(user)}>撤销全部凭据</TableAction>
+                        <TableAction tone="danger" onClick={() => setRevokeTarget(user)}>撤销凭据</TableAction>
                       </TableActions>
                     </td>
                   </tr>

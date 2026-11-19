@@ -88,16 +88,17 @@ function StatusOnlyRow({ review, projectNames }: { review: StatusOnlyReview; pro
             <span className={styles.project}>{projectLabel(review, projectNames)}</span>
             {review.head_sha ? <span className={styles.mrRef}>{review.head_sha.slice(0, 8)}</span> : null}
           </span>
-          <span className={styles.reason}>原因：{reason}</span>
         </div>
       </td>
-      <td className={tableCell.muted}>—</td>
-      <td className={styles.fit}><Badge tone="neutral">未创建评审任务</Badge></td>
+      <td className={styles.fit}><ReasonBadge tone="neutral" reason={reason}>未创建评审任务</ReasonBadge></td>
       <td className={tableCell.muted}>—</td>
       <td className={styles.fit}><VerdictBadge verdict={review.verdict} /></td>
       <td className={tableCell.muted}>—</td>
-      <td className={tableCell.num}>—</td>
-      <td className={classNames(tableCell.muted, tableCell.nowrap)}><RelativeTime value={review.created_at} /></td>
+      <td className={tableCell.num}>
+        <span className={styles.when}>
+          <RelativeTime value={review.created_at} />
+        </span>
+      </td>
     </tr>
   )
 }
@@ -111,13 +112,11 @@ export function ReviewTable({
       <thead>
         <tr>
           <th scope="col">合并请求</th>
-          <th scope="col">档位</th>
           <th scope="col">执行状态</th>
           <th scope="col">发布</th>
           <th scope="col">结论</th>
           <th scope="col">P0 · P1 · P2</th>
-          <th scope="col" className={tableCell.num}>用时</th>
-          <th scope="col">时间</th>
+          <th scope="col" className={tableCell.num}>时间 / 用时</th>
         </tr>
       </thead>
       <tbody>
@@ -148,10 +147,10 @@ export function ReviewTable({
                   <span className={styles.meta}>
                     <span className={styles.mrRef}>!{review.mr_iid}</span>
                     <span className={styles.project}>{projectLabel(review, projectNames)}</span>
+                    {review.profile ? <span className={styles.profile}>{review.profile}</span> : null}
                   </span>
                 </div>
               </td>
-              <td className={styles.fit}>{review.profile ? <Badge plain>{review.profile}</Badge> : <span className={tableCell.muted}>—</span>}</td>
               <td className={styles.fit}><StatusBadge status={review.status} /></td>
               <td className={styles.fit}>
                 {/* The cell holds the badge only; the reason lives in its tooltip. */}
@@ -164,8 +163,12 @@ export function ReviewTable({
               </td>
               <td className={styles.fit}>{review.verdict ? <VerdictBadge verdict={review.verdict} /> : <span className={tableCell.muted}>—</span>}</td>
               <td className={styles.fit}><SevCounts summary={review.findings_summary} /></td>
-              <td className={tableCell.num}>{formatDuration(review.duration_ms)}</td>
-              <td className={classNames(tableCell.muted, tableCell.nowrap)}><RelativeTime value={review.created_at} /></td>
+              <td className={tableCell.num}>
+                <span className={styles.when}>
+                  <RelativeTime value={review.created_at} />
+                  <span className={styles.duration}>{formatDuration(review.duration_ms)}</span>
+                </span>
+              </td>
             </tr>
           )
         })}

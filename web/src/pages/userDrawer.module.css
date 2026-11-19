@@ -122,3 +122,23 @@
   font-size: var(--fs-meta);
   color: var(--muted);
 }
+
+/* User list user cell: display name over the mono username. */
+.userCell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.userName {
+  font-family: var(--font-mono);
+  font-size: var(--fs-meta);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.lastLogin {
+  font-size: var(--fs-meta);
+  color: var(--muted);
+}

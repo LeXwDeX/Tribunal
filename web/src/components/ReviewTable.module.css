@@ -33,11 +33,6 @@
   font-weight: var(--fw-medium);
 }
 
-.reason {
-  color: var(--muted-strong);
-  font-size: var(--fs-meta);
-  overflow-wrap: anywhere;
-}
 
 .titleLink:hover {
   color: var(--text);
@@ -63,4 +58,22 @@
 .project {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+/* Profile joins the MR meta line so the table fits desktop widths. */
+.profile {
+  font-family: var(--font-mono);
+}
+
+/* 时间 / 用时: relative time over duration, right aligned. */
+.when {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  color: var(--muted);
+}
+
+.duration {
+  font-size: var(--fs-meta);
 }

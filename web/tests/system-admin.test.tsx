@@ -108,7 +108,7 @@ describe('admin user and grant management', () => {
       url: '/api/v1/admin/users/1', method: 'PATCH', body: { disabled: true, revision: 7 },
     }))
 
-    await user.click(screen.getAllByRole('button', { name: '撤销全部凭据' })[0])
+    await user.click(screen.getAllByRole('button', { name: '撤销凭据' })[0])
     const revokeDialog = await screen.findByRole('dialog', { name: '撤销全部凭据？' })
     await user.click(within(revokeDialog).getByRole('button', { name: '撤销' }))
     await waitFor(() => expect(writes).toContainEqual({

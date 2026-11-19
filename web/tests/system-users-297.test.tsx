@@ -196,6 +196,21 @@ describe('user management drawer (#297)', () => {
     expect(screen.getByLabelText('项目 ID')).toHaveValue('')
   })
 
+  it('fits the user list at desktop widths with a stacked user cell and short actions', async () => {
+    mock([])
+    const user = userEvent.setup()
+    renderWithProviders(<SystemPage />)
+    await user.click(screen.getByRole('tab', { name: '用户与账号' }))
+    const table = await screen.findByRole('table', { name: '用户与账号' })
+    expect(within(table).getAllByRole('columnheader').map((cell) => cell.textContent)).toEqual([
+      '用户', '角色', '全局模式', '项目授权数', '状态 / 最近登录', '操作',
+    ])
+    const bob = within(table).getByText('bob').closest('tr')!
+    expect(within(bob).getByText('Bob')).toBeInTheDocument()
+    expect(within(bob).getByRole('button', { name: '停用账号' })).toHaveTextContent(/^停用$/)
+    expect(within(bob).getByRole('button', { name: '撤销凭据' })).toBeInTheDocument()
+  })
+
   it('shows the current global mode state', async () => {
     mock([])
     const user = userEvent.setup()
