@@ -28,13 +28,19 @@ const (
 	oauthStateTTL = 10 * time.Minute
 	oauthBodyMax  = 1 << 20
 
-	// maxReturnTo bounds the deep link accepted from the login query.
-	// maxState must stay above the signed encoding of a return_to at that
-	// limit: base64 expands expiry, nonce and return_to by 4/3 and the
-	// signature adds 44 characters, so 512 bytes become a 775-byte state.
-	// 1024 leaves room for a longer expiry prefix.
+	// maxReturnTo bounds the deep link accepted from the login query, measured
+	// on its decoded form. Percent-encoding can expand every byte to three
+	// (space and non-ASCII), so maxState must cover the encoded form: 512 bytes
+	// encode to 1536, the expiry/nonce prefix adds 36, base64 expands by 4/3
+	// and the signature adds 44, giving a 2140-byte state. 4096 leaves room for
+	// a longer expiry prefix and never rejects state this service issued.
 	maxReturnTo = 512
-	maxState    = 1024
+	maxState    = 4096
+
+	// maxEncodedReturnTo is the longest percent-encoded deep link carried by a
+	// state. It is the worst-case expansion of maxReturnTo, so a link accepted
+	// by safeReturnTo always fits maxState.
+	maxEncodedReturnTo = 3 * maxReturnTo
 
 	defaultSessionTTL = 168 * time.Hour
 
@@ -203,12 +209,31 @@ func (a *authService) stateReturnTo(state string) string {
 
 // safeReturnTo accepts only an absolute path on this origin. It rejects
 // protocol-relative URLs, backslashes, schemes, hosts and authentication
-// routes so the login flow cannot become an open redirect.
+// routes so the login flow cannot become an open redirect. value is the
+// decoded deep link from the login query and is bounded by maxReturnTo.
 func safeReturnTo(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" || len(value) > maxReturnTo {
 		return "/"
 	}
+	return checkedReturnTo(value)
+}
+
+// safeStateReturnTo re-checks the percent-encoded deep link carried by a
+// signed state. The link was safe when issued, but the callback never trusts
+// the state, so the same checks run again. The bound applies to the encoded
+// form that the state actually carries; checking the decoded limit here would
+// reject a link that maxReturnTo accepted once it was percent-encoded.
+func safeStateReturnTo(value string) string {
+	if value == "" || len(value) > maxEncodedReturnTo {
+		return "/"
+	}
+	return checkedReturnTo(value)
+}
+
+// checkedReturnTo applies the same-origin path checks shared by the login
+// query and the state carried between login and callback.
+func checkedReturnTo(value string) string {
 	if !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") ||
 		strings.ContainsAny(value, "\\\r\n\x00") {
 		return "/"
@@ -220,7 +245,14 @@ func safeReturnTo(value string) string {
 	if parsed.Path == "/auth" || strings.HasPrefix(parsed.Path, "/auth/") {
 		return "/"
 	}
-	return parsed.RequestURI()
+	// The decoded bounds do not bound the state: RequestURI percent-encodes
+	// spaces and non-ASCII, so check the encoded form that actually travels
+	// in the state.
+	encoded := parsed.RequestURI()
+	if len(encoded) > maxEncodedReturnTo {
+		return "/"
+	}
+	return encoded
 }
 
 func (a *authService) validState(state string) bool {
@@ -456,7 +488,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// Creating a session may evict another session of the same user; open
 	// streams that still hold the evicted session must close promptly.
 	s.invalidateStreamAuth()
-	http.Redirect(w, r, safeReturnTo(s.auth.stateReturnTo(state)), http.StatusSeeOther)
+	http.Redirect(w, r, safeStateReturnTo(s.auth.stateReturnTo(state)), http.StatusSeeOther)
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
