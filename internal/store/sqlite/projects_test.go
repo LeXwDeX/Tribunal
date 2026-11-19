@@ -316,6 +316,146 @@ func TestUpdateProjectWebhookHealthCompareAndSet(t *testing.T) {
 	}
 }
 
+// UpdateProjectDefaultBranch is a compare-and-set: it replaces the stored
+// default branch only while the row still holds the value the caller observed.
+func TestUpdateProjectDefaultBranchCompareAndSet(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	s := openTestStore(t, clock)
+	mustProject(t, s, 42)
+	mustProject(t, s, 43)
+	before, err := s.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+
+	clock.Advance(time.Minute)
+	applied, err := s.UpdateProjectDefaultBranch(ctx, 42, "main", "develop")
+	if err != nil || !applied {
+		t.Fatalf("matching update = %v, %v; want applied", applied, err)
+	}
+	saved, err := s.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if saved.DefaultBranch != "develop" {
+		t.Fatalf("default branch = %q, want develop", saved.DefaultBranch)
+	}
+	if !saved.UpdatedAt.After(before.UpdatedAt) {
+		t.Fatalf("updated_at %v did not advance past %v", saved.UpdatedAt, before.UpdatedAt)
+	}
+	if saved.Revision != before.Revision {
+		t.Fatalf("revision = %d, want %d: a default branch sync is not a settings write", saved.Revision, before.Revision)
+	}
+	other, err := s.GetProject(ctx, 43)
+	if err != nil || other.DefaultBranch != "main" {
+		t.Fatalf("another project changed: %+v, %v", other, err)
+	}
+
+	// A caller that observed the old value loses to the earlier writer.
+	applied, err = s.UpdateProjectDefaultBranch(ctx, 42, "main", "release")
+	if err != nil || applied {
+		t.Fatalf("stale previous = %v, %v; want dropped", applied, err)
+	}
+	saved, err = s.GetProject(ctx, 42)
+	if err != nil || saved.DefaultBranch != "develop" {
+		t.Fatalf("stale write changed the row: %+v, %v", saved, err)
+	}
+
+	// Writing the value that is already stored changes nothing.
+	applied, err = s.UpdateProjectDefaultBranch(ctx, 42, "develop", "develop")
+	if err != nil || applied {
+		t.Fatalf("same value = %v, %v; want no change", applied, err)
+	}
+
+	// An unknown project matches no row, like the other compare-and-set writes.
+	applied, err = s.UpdateProjectDefaultBranch(ctx, 999, "main", "develop")
+	if err != nil || applied {
+		t.Fatalf("unknown project = %v, %v; want false, nil", applied, err)
+	}
+}
+
+func TestUpdateProjectDefaultBranchRejectsInvalidInput(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	mustProject(t, s, 42)
+
+	for _, next := range []string{"", " ", "\t\n"} {
+		applied, err := s.UpdateProjectDefaultBranch(ctx, 42, "main", next)
+		if err == nil || applied {
+			t.Fatalf("next %q = %v, %v; want an error", next, applied, err)
+		}
+	}
+	for _, id := range []int64{0, -1} {
+		applied, err := s.UpdateProjectDefaultBranch(ctx, id, "main", "develop")
+		if err == nil || applied {
+			t.Fatalf("id %d = %v, %v; want an error", id, applied, err)
+		}
+	}
+	saved, err := s.GetProject(ctx, 42)
+	if err != nil || saved.DefaultBranch != "main" {
+		t.Fatalf("rejected update changed the row: %+v, %v", saved, err)
+	}
+}
+
+// The application validates a default branch as a Git ref before it calls the
+// store; the store still refuses names no branch should carry, so a caller that
+// skipped the check cannot persist an option-like, control-character or
+// oversized value.
+func TestUpdateProjectDefaultBranchRejectsUnsafeNames(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	mustProject(t, s, 42)
+
+	rejected := map[string]string{
+		"leading dash":              "-x",
+		"option-like":               "--upload-pack=x",
+		"space":                     "a b",
+		"leading space":             " main",
+		"trailing space":            "main ",
+		"tab":                       "a\tb",
+		"newline":                   "a\nb",
+		"carriage return":           "a\rb",
+		"NUL":                       "a\x00b",
+		"escape":                    "a\x1bb",
+		"DEL":                       "a\x7fb",
+		"C1 control":                "a\u0090b",
+		"non-breaking space":        "a\u00a0b",
+		"line separator":            "a\u2028b",
+		"256 bytes":                 strings.Repeat("a", maxDefaultBranchBytes+1),
+		"256 bytes, multibyte":      strings.Repeat("a", maxDefaultBranchBytes-2) + "孙",
+		"few characters, 258 bytes": strings.Repeat("孙", 86),
+	}
+	for name, next := range rejected {
+		applied, err := s.UpdateProjectDefaultBranch(ctx, 42, "main", next)
+		if err == nil || applied {
+			t.Errorf("%s (%q) = %v, %v; want an error", name, next, applied, err)
+		}
+	}
+	// A rejected name is an error even when it equals the stored value.
+	if applied, err := s.UpdateProjectDefaultBranch(ctx, 42, "a b", "a b"); err == nil || applied {
+		t.Errorf("unchanged unsafe name = %v, %v; want an error", applied, err)
+	}
+	saved, err := s.GetProject(ctx, 42)
+	if err != nil || saved.DefaultBranch != "main" {
+		t.Fatalf("rejected updates changed the row: %+v, %v", saved, err)
+	}
+
+	// Ordinary names, including the longest allowed one, still go through.
+	previous := "main"
+	for _, next := range []string{
+		"develop", "release/1.0", "feature/ü-ж", "v1.2.3-rc.1", "a-b_c",
+		strings.Repeat("b", maxDefaultBranchBytes),
+		strings.Repeat("孙", maxDefaultBranchBytes/3),
+	} {
+		applied, err := s.UpdateProjectDefaultBranch(ctx, 42, previous, next)
+		if err != nil || !applied {
+			t.Fatalf("%q = %v, %v; want it stored", next, applied, err)
+		}
+		previous = next
+	}
+}
+
 func TestDeleteProjectCleansExtensionsAndBindings(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t, newFakeClock())

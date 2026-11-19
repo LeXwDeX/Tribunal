@@ -184,7 +184,15 @@ func (s *WorkspaceService) Handle(ctx context.Context, job *jobs.Job) error {
 		} else if payload.ProjectID <= 0 {
 			err = PermanentJob(fmt.Errorf("invalid workspace project"))
 		} else {
-			err = s.refreshWithOptions(ctx, payload.ProjectID, payload.Ref, WorkspaceRefreshOptions{
+			ref := payload.Ref
+			switch payload.Trigger {
+			case "manual", catchUpTrigger, defaultBranchChangedTrigger:
+				// These refreshes mean "the default branch" and captured it when
+				// they were queued. Follow the current default instead, which
+				// refreshBase synchronizes from GitLab first (#604).
+				ref = ""
+			}
+			err = s.refreshWithOptions(ctx, payload.ProjectID, ref, WorkspaceRefreshOptions{
 				RegenerateContext: payload.RegenerateContext,
 				Reindex:           payload.Reindex,
 			}, job)
@@ -503,7 +511,10 @@ func (s *WorkspaceService) onboardLocked(ctx context.Context, project *store.Pro
 	base := ws.BaseSHA()
 	if fetchBase || base == "" {
 		var err error
-		base, err = s.refreshBase(ctx, ws, project, token, project.DefaultBranch, "")
+		// An empty branch makes refreshBase use the default branch after it has
+		// been synchronized with GitLab; generateContext below reads the same
+		// project value.
+		base, err = s.refreshBase(ctx, ws, project, token, "", "")
 		if err != nil {
 			s.markWorkspaceError(ctx, project.ID, err)
 			return err
@@ -695,10 +706,15 @@ func (s *WorkspaceService) shouldRefreshContext(ctx context.Context, projectID i
 }
 
 func (s *WorkspaceService) refreshBase(ctx context.Context, ws *workspace.Workspace, project *store.Project, token, branch, ref string) (string, error) {
-	remote, err := currentProjectRemote(ctx, s.gitlab, project, token)
+	remote, current, err := currentProjectInfo(ctx, s.gitlab, project, token)
 	if err != nil {
 		return "", err
 	}
+	// The lookup above reports the live default branch. Follow a change before
+	// a branch is chosen below, so this refresh and the context generated from
+	// it use the new default instead of the registered one (#604).
+	previousDefault := project.DefaultBranch
+	syncDefaultBranch(ctx, s.store, s.logger, project, current)
 	auth := repo.Auth{Token: token}
 	if strings.TrimSpace(ref) == "" {
 		if strings.TrimSpace(branch) == "" {
@@ -708,6 +724,12 @@ func (s *WorkspaceService) refreshBase(ctx context.Context, ws *workspace.Worksp
 	}
 	if !strings.HasPrefix(ref, "refs/") {
 		ref = "refs/heads/" + ref
+	}
+	// A push refresh queued for the branch that was the default (a push to it
+	// passed the stored-default filter) must not keep fetching that branch once
+	// the default moved on, whether this call or a concurrent writer moved it.
+	if project.DefaultBranch != previousDefault && ref == "refs/heads/"+previousDefault {
+		ref = "refs/heads/" + project.DefaultBranch
 	}
 	sha, err := fetchProjectRef(ctx, ws, s.git, remote, auth, "+"+ref+":refs/workspace/base", "refs/workspace/base")
 	if err != nil {

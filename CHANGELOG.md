@@ -4,6 +4,23 @@
 
 ## [Unreleased]
 
+### 升级前必读
+
+- **无数据库迁移，无必改配置**（[#604](https://github.com/LeXwDeX/Tribunal/issues/604)）：不新增迁移和配置项，已挂载的配置（含 `x-review.index_command`）继续有效；内置 wrapper 随镜像发布，升级镜像即生效。非容器部署需把仓库中更新后的 `scripts/codebase-memory-mcp.sh` 重新安装到 `/usr/local/bin/tribunal-codebase-memory-mcp`。升级与回滚仍按[通用升级与回滚步骤](docs/operations.md#通用升级与回滚步骤)执行。
+- **评审成本**：共享索引不能证明就是目标提交的评审（主要是目标提交与工作区索引不一致），每次都会完整索引一次本次评审的 base checkout（占用 CPU、磁盘和时间；等待并发名额最长 5 分钟，取得名额后索引最长 10 分钟，进程内最多 2 个同时运行）；默认分支 MR 在工作区索引已跟上时不额外索引。见下文「新增」与[目标提交代码图谱](docs/operations.md#目标提交代码图谱)。
+- **默认分支随 GitLab 同步**：存储的默认分支此前只在登记时写入，现在会自动跟随 GitLab；它也决定未配置 `target_branches` 时哪些 MR 被评审、哪些 push 触发刷新，同步后按新默认分支生效。见[默认分支同步](docs/operations.md#默认分支同步)。
+- **wrapper 的运行时目录在路径过长时移到 `/tmp`**：wrapper 在 `$HOME/run` 不超过 57 字节时保持原样；标准镜像布局（`workspace.root: /app/data/workspaces`，`x-review.home: .mcp/codebase-memory/home`）下项目 ID 不超过 6 位时为 52 到 57 字节，项目的协调文件位置不变。更长的路径（评审目标图谱的 `HOME`，以及 7 位以上的项目 ID）改放 `/tmp/tcbm-10001/<16 位哈希>`，`/tmp` 须对服务用户可写（启用只读根文件系统的自定义部署须为 `/tmp` 提供 tmpfs 或可写卷）。图谱数据与缓存位置不变。
+
+### 新增
+
+- **评审为目标提交建立隔离的代码图谱（目标图谱）**（[#604](https://github.com/LeXwDeX/Tribunal/issues/604)）：共享工作区索引（`workspaces.index_sha`）只跟随一个提交。它不能证明就是评审的目标提交（MR diff 的 `start_sha`）时（主要是 `index_sha` 与目标提交不一致；工作区不是 `ready` 或带有 `last_error` 时同样不能证明），此前评审只能扣留已绑定的 MCP 工具（默认即代码图谱工具）并记录工具缺口，不能得到 PASS。现在，若有效 ignore 未受限，且所有配置了 `x-review.index_command` 的 MCP 服务器都是 stdio，评审在准备阶段持工作区读锁，为本次评审的 base checkout（`start_sha`）在工作区的 `graphs/<runID>/` 下建立隔离图谱：用一个只含这些带索引命令服务器、以该目录为工作区的独立 MCP manager 运行索引命令，因此这些服务器的 `HOME` 和图谱只含这一份。带索引命令服务器的工具从这个 manager 绑定，其他 MCP 服务器仍走项目共享 manager。详见[目标提交代码图谱](docs/operations.md#目标提交代码图谱)与[配置设计](docs/design/06-config.md#目标提交代码图谱)。
+  - 生命周期与成本：生命周期等同一次评审 run，评审结束先关闭 manager 再删除目录，不跨评审缓存。每次需要目标图谱的评审都会完整索引一次 base checkout（CPU、磁盘和时间）；默认分支 MR 在工作区索引已跟上时不额外索引。等待并发名额最多 5 分钟、取得名额后索引最多 10 分钟（代码常量，不可配置），进程内最多 2 个目标图谱索引同时运行；同一项目、提交与索引配置的可降级失败在 15 分钟内不重试。没有活动评审块绑定带索引命令服务器的工具时不建图谱；开始索引前再次确认本次运行未被新的 MR 版本取代。
+  - 资格证明不放宽：仍要求 `index_sha == target_sha`。dossier `workspace_provenance` 新增可选字段 `index_source`（`workspace` 为共享工作区索引，`run` 为本次评审的目标图谱），provenance 版本号不变；没有该字段的旧 dossier 照常可读、可恢复。
+  - 失败与降级：建图谱失败或超时不使评审失败，评审照常完成，按原规则扣留已绑定的 MCP 工具并记录工具缺口（不能 PASS），并记 WARN `target code graph unavailable; continuing without it`，字段为 `project_id` 与 `error_class`（取值 `invalid_request`、`base_unverified`、`setup_failed`、`index_failed`、`index_incomplete`、`timeout`、`slot_busy`、`canceled`、`recently_failed`；`slot_busy` 表示等待并发名额超时、索引未运行，不计入 15 分钟失败记录）。父任务取消或出站令牌失效时，评审报错并重试，不降级。
+  - 不启用的情形：ignore 受限时完全不建索引（安全边界不变）；带索引命令的服务器中有 http 类型时不启用目标图谱。
+  - 崩溃恢复：进程重启后恢复 `MCPEligible` 的工作流时，若共享索引仍不匹配，重建 per-run base 与目标图谱后继续；仍无法证明才按原规则以 `index_ineligible` 取消。
+  - 运行清理：持工作区写锁的 run cleanup 删除 `graphs/` 下崩溃残留、早于保留期（`workspace.run_cleanup_after`）且不受保护的目录；`run cleanup finished` 日志新增 `removed_graphs` 字段。
+
 ### 变更
 
 - **控制台表格统一为共享表格规范，用户详情抽屉与用户列表重新设计**（[#610](https://github.com/LeXwDeX/Tribunal/issues/610)）：只改控制台界面与文档；无 API、配置项、数据库迁移或依赖变更。
@@ -31,6 +48,12 @@
 
 - **控制台未完成摘要按结构化信号计数**（[#608](https://github.com/LeXwDeX/Tribunal/issues/608)）：#603 之前存储的摘要按每个工具缺口逐条计数，旧评审的 `summary_text` 因此会显示「另有 29 项检查未完成」，而其中几乎都是同一原因。现在评审带有未解决信号时，`summary_text` 的原因列表与「另有 N 项」由这些信号按分类与中文说明分组生成，与控制台的分组一致；没有信号时仍解析存储的摘要。只影响 API 派生字段，不改存储，也不改 GitLab 摘要。
 - **普通轮次的损坏工具调用可恢复，不再直接判节点失败**（[#605](https://github.com/LeXwDeX/Tribunal/issues/605)）：推理网关在长参数里漏转义引号等损坏是已知现象（[#269](https://github.com/LeXwDeX/Tribunal/issues/269)），但循环此前只在提交提示轮丢弃这类损坏调用并要求重发；探索或评审的普通轮遇到同样的损坏会直接返回 `unsafe_model_response`，整个节点失败，此前所有轮次的 token 白花，评审覆盖随之下降（实测一个 explore 节点在第 18 轮因一个参数约 9.9KB、不是合法 JSON 的调用失败）。现在任何一轮（最后一轮除外）遇到可恢复的损坏调用（`invalid_json`、`not_object`、`empty_input`、`non_string_field`、`empty_id`、`empty_name`、`duplicate_id`）时，整批调用都不执行，循环丢弃这批调用和该轮推理内容（assistant 文本保留），追加一条只含类别名和严格 JSON 转义要求的固定反馈，让模型把刚才想调用的工具用合法 JSON 重发。普通轮的反馈不限定 `submit_result`，恢复轮仍是普通轮；提交提示轮的反馈与行为不变。普通轮有独立的每次运行两次上限（`maxOrdinaryInvalidRecoveries`），与提交提示轮的两次（`maxInvalidRecoveries`）互不占用；恢复占用一次模型请求，计入 `max_turns` 和用量，不延长上限。恢复次数用尽、最后一轮、协议异常（`unsupported_item`、`malformed_list` 等）和非 tool_use 的 stop reason 下的不合法调用仍以 `unsafe_model_response` 结束运行。被恢复的那次调用仍写 `llm_calls` 审计行，`error_kind` 为 `unsafe_model_response` 并带 `invalid_tool_call` 元数据（记录器的预分类，行为不变），所以按模型统计里的该类错误计数包含已恢复的调用，可高于因它失败的节点数。`docs/operations.md` 与设计文档同步说明；无配置项、API 或数据库迁移变更。
+- **项目默认分支随 GitLab 自动同步**（[#604](https://github.com/LeXwDeX/Tribunal/issues/604)）：`projects.default_branch` 此前只在登记时写入，GitLab 上改名或切换默认分支后，工作区刷新与索引仍取旧分支（旧分支被删除时刷新以 `git: branch not found` 失败），未配置 `target_branches` 的项目还会把新默认分支的 MR 与 push 过滤掉。现在工作区刷新、onboarding 和每次评审准备读取 GitLab 项目时，若 GitLab 报告的默认分支非空、是合法分支名且与存储值不同，就按旧值比较后更新存储（INFO `project default branch synchronized`，字段 `project_id`）；评审路径发现变化时另排队一次工作区刷新（trigger `default_branch_changed`），让 `base/` 与工作区索引跟上新默认分支。同步失败只记 WARN `project default branch sync failed`（字段 `project_id`、`error_class`），不影响刷新或评审。默认分支也决定未配置 `target_branches` 时哪些 MR 被评审、哪些 push 触发刷新，同步后按新默认分支生效；webhook 入口不请求 GitLab，事件仍按存储值判断，但认证通过的 push、MR、注记事件的载荷里 `project.default_branch` 是合法分支名且与存储值不同时，会另排队一次工作区刷新（trigger `default_branch_changed`，投递事件 `Default Branch Refresh`，同一项目、同一报告分支每分钟至多一次），由刷新读取 GitLab 后同步，载荷本身不写入存储；改名后第一个落在新默认分支上的事件仍会被 `branch_filtered` 丢弃。入队失败只记 WARN `default branch refresh enqueue failed`（字段 `project_id`、`error_class`）。push 触发的刷新若推的正是刚被取代的旧默认分支，改取新默认分支；存储层另外拒绝含控制字符、空白、前导 `-` 或超过 255 字节的默认分支名。无数据库迁移。
+- **内置 codebase-memory wrapper 不再因运行时目录过长而整体失败**（[#604](https://github.com/LeXwDeX/Tribunal/issues/604)）：codebase-memory-mcp 0.12.1 在 `CBM_RUNTIME_DIR` 下建 unix socket，路径超过约 60 字节时所有调用（含 `cli index_repository`）都会失败。wrapper 现在在 `$HOME/run` 不超过 57 字节时保持原样（标准镜像布局为 52 到 57 字节；macOS 上实测 60 字节可用、70 字节失败）；更长时改用 `/tmp/tcbm-<uid>/<HOME 的 SHA-256 前 16 位>`（目录权限 0700，父目录必须是当前用户自己的真实目录，否则 fail closed；已存在时权限收紧为 0700）。图谱数据与缓存仍在 `HOME` 内，只有协调文件移出。每个这样的目录在 `.home` 里记录它服务的 `HOME`，wrapper 启动时尽力删除该父目录下其他目录中记录的 `HOME` 已不存在的，不看修改时间，没有可信记录的目录不动。目标图谱的 `HOME` 在 `graphs/<runID>/` 之下，路径较深，依赖这一回退。
+
+### 文档
+
+- 补充目标提交代码图谱、默认分支同步与 wrapper 运行时目录的运维和配置说明（[#604](https://github.com/LeXwDeX/Tribunal/issues/604)）；同时更正 `docs/operations.md` 中仍按「有效 ignore 为空 / 非空」描述图谱与索引的旧口径：与 [#457](https://github.com/LeXwDeX/Tribunal/issues/457) 一致，只有项目设置或仓库 `.gitlab-review.yml` 追加了超出内置默认规则的项才算受限，才会停用索引与 MCP 工具。
 
 ## [1.8.0] - 2026-11-19
 

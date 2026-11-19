@@ -8,9 +8,29 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/LeXwDeX/tribunal/internal/store"
 )
+
+// maxDefaultBranchBytes bounds a stored default branch name.
+const maxDefaultBranchBytes = 255
+
+// storableDefaultBranch is the store's own guard for a default branch it is
+// asked to persist; the application validates the name as a Git ref first. A
+// name with control characters or whitespace, an option-like leading "-" or an
+// excessive length is never stored, whatever the caller checked.
+func storableDefaultBranch(name string) bool {
+	if name == "" || len(name) > maxDefaultBranchBytes || name[0] == '-' {
+		return false
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
+}
 
 func projectFilterClauses(filter store.ProjectFilter) ([]string, []any) {
 	where := []string{"1 = 1"}
@@ -289,6 +309,40 @@ func (s *Store) UpdateProjectWebhookHealth(ctx context.Context, id int64, observ
 	n, err := res.RowsAffected()
 	if err != nil {
 		return false, fmt.Errorf("sqlite: update project webhook health: %w", err)
+	}
+	return n == 1, nil
+}
+
+// UpdateProjectDefaultBranch replaces the stored default branch only while the
+// row still holds previous. The default branch is written at registration and
+// otherwise follows the branch GitLab reports, so two writers can observe the
+// same drift; the loser of the compare-and-set reads the winner's value instead
+// of overwriting it. It reports whether the row changed: an unknown project, a
+// stale previous value and an unchanged value all return false without an
+// error, and a name that is not storable (see storableDefaultBranch) is an
+// error. Like a webhook health write it does not touch the settings revision.
+func (s *Store) UpdateProjectDefaultBranch(ctx context.Context, id int64, previous, next string) (bool, error) {
+	if id <= 0 {
+		return false, errors.New("sqlite: project id is required")
+	}
+	if strings.TrimSpace(next) == "" {
+		return false, errors.New("sqlite: default branch is required")
+	}
+	if !storableDefaultBranch(next) {
+		return false, errors.New("sqlite: default branch is not a valid branch name")
+	}
+	if previous == next {
+		return false, nil
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE projects SET default_branch = ?, updated_at = ? WHERE id = ? AND default_branch = ?`,
+		next, formatTime(s.now().UTC()), id, previous)
+	if err != nil {
+		return false, fmt.Errorf("sqlite: update project default branch: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("sqlite: update project default branch: %w", err)
 	}
 	return n == 1, nil
 }

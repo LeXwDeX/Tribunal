@@ -22,7 +22,10 @@ import (
 )
 
 type reviewExecution struct {
-	blocks            map[string]config.BlockBinding
+	blocks map[string]config.BlockBinding
+	// activeBlocks names the blocks the review graph of this execution can run,
+	// the ones whose bindings can reach an agent call.
+	activeBlocks      map[string]bool
 	tools             review.ToolProvider
 	skills            review.SkillProvider
 	digest            []byte
@@ -30,6 +33,28 @@ type reviewExecution struct {
 	repository        *review.RepositorySkillProvenance
 	repositoryCleanup func()
 	releaseSet        func()
+	// mcp, mcpConfig and deniedEnv are the project's MCP runtime. They stay
+	// empty without project extensions, which keeps a per-run target graph off.
+	mcp       *mcp.Manager
+	mcpConfig mcp.Config
+	deniedEnv []string
+}
+
+// bindsIndexedTool reports whether a block the review graph can run binds a tool
+// of an index-backed MCP server, one with an index command. Without such a
+// binding no tool could ever read an index built for this review.
+func (e *reviewExecution) bindsIndexedTool() bool {
+	for block, binding := range e.blocks {
+		if !e.activeBlocks[block] {
+			continue
+		}
+		for _, tool := range binding.MCPTools {
+			if server, ok := mcpToolServer(tool); ok && len(e.mcpConfig.MCPServers[server].XReview.IndexCommand) > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // releaseResolverSet drops the project extension lease. The caller must keep
@@ -50,7 +75,7 @@ func (s *ReviewService) resolveReviewExecution(ctx context.Context, project *sto
 	if err != nil {
 		return nil, PermanentJob(fmt.Errorf("build review graph: %w", err))
 	}
-	execution := &reviewExecution{blocks: s.blocks, tools: s.tools, skills: s.skills, skillRoots: make(map[string]string)}
+	execution := &reviewExecution{blocks: s.blocks, activeBlocks: activeBlocks, tools: s.tools, skills: s.skills, skillRoots: make(map[string]string)}
 	releaseOnError := true
 	defer func() {
 		if releaseOnError {
@@ -70,6 +95,7 @@ func (s *ReviewService) resolveReviewExecution(ctx context.Context, project *sto
 		if len(set.mcpConfig.MCPServers) > 0 {
 			deniedEnv = append([]string(nil), s.extensions.deniedEnv...)
 		}
+		execution.mcp, execution.mcpConfig, execution.deniedEnv = set.mcp, set.mcpConfig, deniedEnv
 	}
 	repository, err := s.resolveRepositorySkillRuntime(ctx, project, token, targetBranch, deny, execution.blocks, execution.skills)
 	if err != nil {

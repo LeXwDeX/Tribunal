@@ -569,6 +569,79 @@ func TestRemoveWorktreePrunesMissingRegistration(t *testing.T) {
 	}
 }
 
+// A crash can remove a worktree directory without removing its registration in
+// the mirror, and git then refuses to add the same path again. AddWorktree
+// prunes the stale registration itself, so a recovered run can recreate its
+// checkout without a RemoveWorktree in between.
+func TestAddWorktreeRecreatesPathWhoseDirectoryWasRemovedBehindGit(t *testing.T) {
+	ctx := context.Background()
+	source := initRepo(t)
+	sha := commitFile(t, source, "a.txt", "one\n", "first")
+	root := t.TempDir()
+	mirror := filepath.Join(root, "mirror.git")
+	g := &Git{}
+	if err := g.EnsureMirror(ctx, mirror, "https://example.com/group/repo.git", Auth{}); err != nil {
+		t.Fatal(err)
+	}
+	pushToMirror(t, source, mirror)
+
+	dir := filepath.Join(root, "run")
+	if err := g.AddWorktree(ctx, mirror, dir, sha); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.AddWorktree(ctx, mirror, dir, sha); err != nil {
+		t.Fatalf("AddWorktree(path registered but missing) = %v, want it recreated", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "a.txt")); err != nil || string(data) != "one\n" {
+		t.Fatalf("recreated worktree content = %q, %v", data, err)
+	}
+	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("recreated worktree permissions = %v, %v", info, err)
+	}
+	if got := strings.Count(gitCmd(t, mirror, "worktree", "list", "--porcelain"), "worktree "); got != 2 {
+		t.Fatalf("registered worktrees = %d, want the mirror and the one recreated checkout", got)
+	}
+}
+
+// Only a registered-but-missing path is retried. A locked registration is an
+// operator decision that pruning would override, so it keeps failing with a
+// sanitized error that names no path.
+func TestAddWorktreeDoesNotPruneLockedRegistrations(t *testing.T) {
+	ctx := context.Background()
+	source := initRepo(t)
+	sha := commitFile(t, source, "a.txt", "one\n", "first")
+	root := t.TempDir()
+	mirror := filepath.Join(root, "mirror.git")
+	g := &Git{}
+	if err := g.EnsureMirror(ctx, mirror, "https://example.com/group/repo.git", Auth{}); err != nil {
+		t.Fatal(err)
+	}
+	pushToMirror(t, source, mirror)
+
+	dir := filepath.Join(root, "run")
+	if err := g.AddWorktree(ctx, mirror, dir, sha); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, mirror, "worktree", "lock", dir)
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	err := g.AddWorktree(ctx, mirror, dir, sha)
+	var ge *Error
+	if !errors.As(err, &ge) || ge.Op != "add worktree" || ge.Reason != "" {
+		t.Fatalf("AddWorktree(locked registration) = %#v, want a sanitized add worktree failure", err)
+	}
+	if strings.Contains(err.Error(), root) {
+		t.Fatalf("error leaks a path: %v", err)
+	}
+	if _, statErr := os.Lstat(dir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("a failed add left %s behind: %v", dir, statErr)
+	}
+}
+
 func TestRemoveWorktreeAcceptsMissingMirror(t *testing.T) {
 	ctx := context.Background()
 	source := initRepo(t)

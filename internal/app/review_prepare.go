@@ -85,10 +85,12 @@ func (s *ReviewService) prepareRun(ctx context.Context, project *store.Project, 
 	fail := func(err error) (string, func(), error) {
 		return "", nil, err
 	}
-	remote, err := currentProjectRemote(ctx, s.gitlab, project, token)
+	remote, current, err := currentProjectInfo(ctx, s.gitlab, project, token)
 	if err != nil {
 		return fail(err)
 	}
+	// The lookup above reports the live default branch (#604).
+	s.syncProjectDefaultBranch(ctx, project, current)
 	if err := ws.EnsureRoot(); err != nil {
 		return fail(err)
 	}

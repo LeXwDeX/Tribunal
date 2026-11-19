@@ -154,12 +154,23 @@ type IgnorePolicy struct {
 	Patterns []string `json:"patterns"`
 }
 
+// Index sources record where the code graph behind IndexSHA came from. A
+// dossier written before the field existed has no source and means the shared
+// workspace index.
+const (
+	// IndexSourceWorkspace is the project's shared workspace index.
+	IndexSourceWorkspace = "workspace"
+	// IndexSourceRun is a graph built for this review run alone.
+	IndexSourceRun = "run"
+)
+
 // WorkspaceProvenance records the source of workspace materials at collection.
 type WorkspaceProvenance struct {
 	Version        int    `json:"version"`
 	TargetSHA      string `json:"target_sha"`
 	ContextBaseSHA string `json:"context_base_sha,omitempty"`
 	IndexSHA       string `json:"index_sha,omitempty"`
+	IndexSource    string `json:"index_source,omitempty"`
 	MCPEligible    bool   `json:"mcp_eligible"`
 }
 
@@ -179,6 +190,10 @@ func (d *Dossier) WorkspaceProvenanceValid() bool {
 	// than the merge base; its own base is recorded instead. Ignore patterns do
 	// not invalidate material that was produced under the same policy (#457).
 	if p.ContextBaseSHA != "" && !validObjectID(p.ContextBaseSHA) {
+		return false
+	}
+	// An absent source is a dossier from before the field existed.
+	if p.IndexSource != "" && p.IndexSource != IndexSourceWorkspace && p.IndexSource != IndexSourceRun {
 		return false
 	}
 	return !p.MCPEligible || (validObjectID(p.IndexSHA) && strings.EqualFold(p.IndexSHA, p.TargetSHA))

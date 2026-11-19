@@ -54,11 +54,11 @@ sequenceDiagram
 | 8 | `GET .../merge_requests/:iid/closes_issues` | 失败不阻塞 |
 | 9 | 读目标分支上的 `.gitlab-review.yml`、`AGENTS.md`、`CLAUDE.md`：`GET /projects/:id/repository/files/:path/raw?ref=<target>` | 404 视为没有 |
 | 10 | 合并配置（平台 → 项目 → 仓库）；worker 按合并后的设置复核 Draft/标签/目标分支（`allow_repo_config=true` 时包含目标分支仓库配置）；计算 ignore；记录 included、ignored、generated、omitted 和变更总数；增量范围 | 项目设置无法安全解析，或已启用的仓库配置 YAML 解析失败 → 停止此次执行，不回退为较宽松规则；被过滤的自动评审在创建 workflow 前结束 |
-| 11 | 工作区 `RLock`；`git fetch refs/merge-requests/<iid>/head`；`git worktree add <runs>/<wf> <head_sha>`；共享 `base/` 的 HEAD 不等于 MR `start_sha` 时 fetch 目标分支并创建 `<runs>/<wf>-base`；仍无法证明 base 时记录 `metadata.base_identity=absent` 与覆盖缺口警告 | fetch 失败 → job 重试；base 不可用不阻断评审，但缺口进入 dossier 与摘要评论 |
+| 11 | 工作区 `RLock`；`git fetch refs/merge-requests/<iid>/head`；`git worktree add <runs>/<wf> <head_sha>`；共享 `base/` 的 HEAD 不等于 MR `start_sha` 时 fetch 目标分支并创建 `<runs>/<wf>-base`；仍无法证明 base 时记录 `metadata.base_identity=absent` 与覆盖缺口警告；共享索引不能证明就是目标提交时，另为该 base 建[目标图谱](#目标图谱)（在步骤 12 确认有文件要评审之后） | fetch 失败 → job 重试；base 不可用不阻断评审，但缺口进入 dossier 与摘要评论；目标图谱建不出来或超时同样不阻断评审，降级为不提供已绑定的 MCP 工具并记录 `tool_gaps`（不能 PASS） |
 | 12 | 变更文件为 0：全被 ignore → 发布「无需评审」的汇总；全被采集缺口 omitted → 不建 workflow，发布 INCOMPLETE 摘要，列出 omitted 总数、原因计数和最多 4 条路径，其余只计数。两者都结束 | — |
 | 13 | `BuildGraph` → `Engine.Create` → `Engine.Run` | 工作流 failed → F1-失败分支 |
 | 14 | 发布（F7） | GitLab 写入失败 → 重试 3 次；可重试失败保持 `publication_state=pending`，永久失败标为 `failed`；控制台可手动 republish |
-| 15 | 清理 worktree，释放锁 | 正常路径清理失败只记日志，不改变已完成评审；后台 run cleanup 定期删除未被引用且超过 `workspace.run_cleanup_after` 年龄的遗留 run |
+| 15 | 关闭目标图谱（先停其 MCP 服务器，再删除 `graphs/<runID>/`），清理 worktree，释放锁 | 正常路径清理失败只记日志，不改变已完成评审；后台 run cleanup 定期删除未被引用且超过 `workspace.run_cleanup_after` 年龄的遗留 run 和目标图谱目录 |
 
 > 实际执行顺序：步骤 1–2 后，先做步骤 4–10 的采集、配置合并和过滤；未被过滤的自动评审才执行步骤 3 的取消，然后继续步骤 11。
 
@@ -82,6 +82,16 @@ Anthropic 的输入用量将未缓存、缓存读取和缓存创建各计一次�
 - 上次的 head 不再是当前 head 的祖先（force push）→ 自动退回全量。
 - 过滤评审范围时，没有 `path` 的 finding 保留为「无法定位」条目并参与最终 verdict；某一路在范围外文件上报了 P0/P1 时，该 finding 仍被过滤，但同时产生一个未解决信号，避免窄范围结果被当成干净的 PASS。
 - 本次评审范围以结构化字段披露：dossier 的 `incremental`（是否全量、上次 head、增量文件）和 `SynthesisResult.scope`（`full`、`head`、`last_head`、`files`、`file_count`、`unlocated`）。`files` 最多保存 200 条，`file_count` 是完整增量文件数；摘要渲染为「评审范围」段（全量 / 增量、上次与本次 head、覆盖文件数、无法定位数；增量时明确「结论仅覆盖本次增量变更的文件」），生成文件的数量与路径同样在该段披露（`DiffSummary.generated` / `generated_paths`）。行内正文与汇总条目逐字完整发布，不按内容长度截断；`evidence`/`suggestion`/`reason` 的生成侧契约上限（64,000/64,000/8,000 rune）只由 `Validate` 强制，渲染层不据此裁剪，更长内容由节点 `max_tokens` 与契约上限共同决定。发布侧唯一上限是 GitLab 平台字节上限：超过时按逐条累计字节预算渲染，省略放不下的尾部完整条目并标注「余下内容见控制台」，不切断代码块、`<details>` 块或多字节字符。结论长度由 `prompts/main.synthesize.md`（1–3 句、不超过 3000 字符）与节点级 `max_tokens`（控制台 `NodeParams`，键 `synthesize` / `synthesize.2`）决定。
+
+### 目标图谱
+
+共享工作区索引（`workspaces.index_sha`）只跟随一个提交，不能证明就是评审的目标提交（MR diff 的 `start_sha`）时，评审为自己的 base checkout 建一份只属于这次评审的代码图谱（[#604](https://github.com/LeXwDeX/Tribunal/issues/604)）。运行时行为、成本和排查见[运维手册](../operations.md#目标提交代码图谱)，配置规则见[配置设计](06-config.md#目标提交代码图谱)。
+
+- **启用条件**（同时满足）：共享索引不满足使用条件（`index_sha` 与 `start_sha` 不一致，或工作区不是 `ready`、带有 `last_error`）；有效 ignore 未受限；所有配置了 `x-review.index_command` 的 MCP 服务器都是 stdio。共享索引满足条件时不额外索引。
+- **时机**：在持工作区读锁、base checkout 已在 `start_sha`、且步骤 12 确认有文件要评审之后才建，全被 ignore 或全被 omitted 的空评审不付索引成本。续跑原快照允许 MCP 的评审（job 重试续跑，或进程重启后的恢复，见 F6 第 3 步）时重新建。
+- **建立与路由**：创建空的 `graphs/<runID>/`，用一个只含这些服务器、以该目录为工作区的独立 MCP manager 运行 `index_command`，前后核对 base 的 HEAD 仍是 `start_sha`；带索引命令服务器的工具从该 manager 绑定，其他 MCP 服务器仍走项目共享 manager。dossier 的 `workspace_provenance` 记 `index_sha=start_sha`、`index_source=run`、`mcp_eligible=true`；资格证明不放宽，索引 SHA 仍须等于目标提交。
+- **降级**：建图谱失败或超时（等待并发名额最长 5 分钟，取得名额后索引最长 10 分钟，进程内最多 2 个同时运行；同一提交与索引配置失败后 15 分钟内不重试）不使评审失败。评审照常完成，按原规则不提供已绑定的 MCP 工具并记录 `tool_gaps`（不能 PASS），同时记 WARN `target code graph unavailable; continuing without it`，字段只有 `project_id` 与固定词 `error_class`。父任务取消或出站令牌失效时，评审报错并按 job 重试，不降级。
+- **生命周期**：等同这次 run，不跨评审缓存。步骤 15 先关闭 manager 再删除 `graphs/<runID>/`；进程崩溃遗留的目录由后台 run cleanup 回收（F6 第 5 步）。
 
 ---
 
@@ -124,6 +134,8 @@ Note Hook 统一先持久化为 `review.command`，以下 GitLab 校验由 worke
 5. 判断是否重新生成上下文文档：以当前生效上下文文档的 base 为起点，比较其到新 base 的**累计**变更文件数 ≥ `context_refresh.changed_files`，或距**最后一次成功生成**的时间 ≥ `context_refresh.max_age`，且当前文档未锁定 → 运行 onboarding 工作流（F5 第 4 步起）。普通工作区刷新不推进该时间锚点，持续小批量 push 会累计漂移。
 6. 释放锁。
 
+**其他刷新触发与默认分支**（[#604](https://github.com/LeXwDeX/Tribunal/issues/604)）：`workspace.refresh` 也由手动刷新（控制台「刷新工作区」或 `POST /api/v1/projects/{id}/workspace/refresh`）、启动追赶扫描（trigger `catch_up`）和评审准备或 webhook 载荷（`project.default_branch` 与存储值不同）发现默认分支变化（trigger `default_branch_changed`）入队。这三类都表示“刷新默认分支”：执行时不使用入队时记下的分支，而是在读取 GitLab 项目时先同步存储的默认分支（`projects.default_branch`；GitLab 报告的值非空、是合法分支名且与存储值不同才更新），再取当前默认分支的最新提交作为第 3 步检出的目标。push 触发的刷新（trigger `push`）仍取 push 的 `ref`，只有推的正是同步前存储的旧默认分支且默认分支已变化时改取新默认分支。onboarding（F5 第 4 步）同理。同步失败只记 WARN，不影响刷新。同步条件、日志与限制见[运维手册](../operations.md#默认分支同步)。
+
 ---
 
 ## F5 项目注册与 onboarding
@@ -132,7 +144,7 @@ Note Hook 统一先持久化为 `review.command`，以下 GitLab 校验由 worke
 2. 可选：创建 webhook。
 3. 入库，`workspaces.state=new`，入队 `workspace.onboard`。
 4. onboarding job：
-   1. `state=onboarding`；`EnsureMirror` + 检出 `base/`。
+   1. `state=onboarding`；`EnsureMirror` + 检出 `base/`（取默认分支，读取 GitLab 项目时先同步默认分支，见 F4）。
    2. 建外部索引（按平台和项目配置的 MCP 中声明了 `index_command` 的服务器）。
    3. 读取目标分支上的 AGENTS.md / CLAUDE.md。
    4. 创建 onboarding 工作流（单节点），产出 `OnboardingOut`。
@@ -151,11 +163,12 @@ Note Hook 统一先持久化为 `review.command`，以下 GitLab 校验由 worke
    - `running` 节点：写 `node.restarted`，重置为 `pending`，`attempt+1`。
    - `queued` 节点：保持 `queued`（幂等重入）。
    - 然后重新进入调度循环。
-3. 评审节点无副作用，重跑安全。job 重试关联原工作流，不重跑已完成节点。已有 run worktree 必须校验 HEAD 后复用；缺失时从 mirror 恢复。材料缺失或 base 漂移时明确失败，不混跑。
+3. 评审节点无副作用，重跑安全。job 重试关联原工作流，不重跑已完成节点。已有 run worktree 必须校验 HEAD 后复用；缺失时从 mirror 恢复。材料缺失或 base 漂移时明确失败，不混跑。原快照允许 MCP、但共享索引已不匹配其 base 时（例如图谱原本由[目标图谱](#目标图谱)提供），重建 per-run base 与目标图谱后继续；仍无法证明索引才以 `index_ineligible` 取消。
 4. 还需恢复「已完成但尚未发布」的工作流；它们不属于引擎的未终态集合。发布阶段靠 F7 的幂等恢复：`publication_state=pending` 的终态工作流在启动后重试；failed execution 按 `post_failure_note` 发布未完成摘要或记为 skipped；取消/被新代次替换记为 skipped；自动恢复不会覆盖 published/failed（手动 republish 是显式例外）。失败或跳过原因有界、脱敏保存，材料快照、事件和日志不得含项目 token、provider key 或 MCP 密钥。
 5. 后台 run cleanup 服务随 `StartBackground` 启动：启动后立即执行一次，之后每小时执行。它先查询 `workspaces` 表、全局 run 保护引用和每个项目的 context 保护 SHA，再在项目写锁内触碰项目文件；任一必要查询失败即不对该项目删除，项目列表查询失败则整轮不删除。
    - run 保护包括非终态 workflow、queued/running job、`publication_state=pending` 的 dossier（workflow_id 和 job_id），以及本进程 workspace manager 仍注册的 run。超过 `workspace.run_cleanup_after`（默认 1h，是年龄阈值而非清理周期）且不受保护的 `runs/<id>` 才删除；删除前先移除 Git worktree 关联。缺失 mirror 时只有已通过年龄、引用保护、本进程注册和路径检查的 run 才允许删除，其他 Git 失败保留目录。mirror 存在但 run 目录未注册为 worktree（如 `AddWorktree` 失败留下的孤儿）时保留目录并记录错误。
    - `context/<sha>` 目录同样按该年龄阈值清理，但必须保留所有 `context_docs` 记录引用的 base SHA、workspace 的 `base_sha`/`context_sha`、未终态 workflow 的 base，以及 `publication_state=pending` dossier 的 base。目录 metadata 标记 locked、不可读或非法时保留该目录（fail closed）。
+   - `graphs/<runID>` 目录（评审的[目标图谱](#目标图谱)）同样在项目写锁内清理：评审结束时自行删除目录，且整个 run 期间持工作区读锁，所以写锁下仍存在的目录是进程崩溃遗留。只有早于 `workspace.run_cleanup_after`、run ID 不在上述 run 保护集合且不是本进程 workspace manager 注册的 run 的目录才删除；符号链接、普通文件和名称不是合法 run ID 的条目保留。`run cleanup finished` 日志用 `removed_graphs` 记录本轮删除的目录数，与 `removed_runs`、`removed_contexts` 并列。
    - 路径不是目录、为符号链接或不在项目根内时跳过/报错；项目缺少 `workspaces` 行时不会被遍历。
 
 ---

@@ -393,47 +393,56 @@ func trimProjectWebURL(webURL string) string {
 // currentProjectRemote resolves a project by its registered numeric ID before
 // sending its token to a Git remote. The stored URL is only an origin anchor.
 func currentProjectRemote(ctx context.Context, client GitLabClient, project *store.Project, token string) (string, error) {
+	remote, _, err := currentProjectInfo(ctx, client, project, token)
+	return remote, err
+}
+
+// currentProjectInfo performs the lookup and checks of currentProjectRemote and
+// also returns the project record GitLab reported, so a caller that needs more
+// than the remote (the default branch) does not repeat the request. The record
+// is returned only when every identity and origin check passed.
+func currentProjectInfo(ctx context.Context, client GitLabClient, project *store.Project, token string) (string, *gitlab.Project, error) {
 	lookup, ok := client.(interface {
 		GetProject(context.Context, string, string) (*gitlab.Project, error)
 	})
 	if !ok || project == nil || project.ID <= 0 {
-		return "", errors.New("app: project identity unavailable")
+		return "", nil, errors.New("app: project identity unavailable")
 	}
 	current, err := lookup.GetProject(ctx, token, fmt.Sprint(project.ID))
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if current == nil || current.ID != project.ID {
-		return "", errProjectIdentityChanged
+		return "", nil, errProjectIdentityChanged
 	}
 	ref, err := gitlab.ParseProjectRef(current.PathWithNamespace)
 	if err != nil || ref.ID != 0 || ref.Path != current.PathWithNamespace {
-		return "", fmt.Errorf("app: project path invalid: %w", errProjectIdentityChanged)
+		return "", nil, fmt.Errorf("app: project path invalid: %w", errProjectIdentityChanged)
 	}
 	old, err := url.Parse(project.WebURL)
 	if err != nil || strings.TrimSpace(project.WebURL) != project.WebURL || strings.ContainsAny(project.WebURL, " \\%#") || hasControlChar(project.WebURL) ||
 		old.Opaque != "" || old.Host == "" || old.Hostname() == "" || old.User != nil || old.RawQuery != "" || old.ForceQuery || old.Fragment != "" || (old.Scheme != "http" && old.Scheme != "https") {
-		return "", fmt.Errorf("app: project origin invalid: %w", errProjectIdentityChanged)
+		return "", nil, fmt.Errorf("app: project origin invalid: %w", errProjectIdentityChanged)
 	}
 	base := ""
 	if project.PathWithNamespace != "" {
 		suffix := "/" + project.PathWithNamespace
 		if !strings.HasSuffix(strings.TrimRight(old.Path, "/"), suffix) {
-			return "", fmt.Errorf("app: project origin invalid: %w", errProjectIdentityChanged)
+			return "", nil, fmt.Errorf("app: project origin invalid: %w", errProjectIdentityChanged)
 		}
 		base = strings.TrimSuffix(strings.TrimRight(old.Path, "/"), suffix)
 	}
 	origin, err := parseGitLabOrigin(old.Scheme + "://" + old.Host + base)
 	if err != nil || origin == nil {
-		return "", fmt.Errorf("app: project origin invalid: %w", errProjectIdentityChanged)
+		return "", nil, fmt.Errorf("app: project origin invalid: %w", errProjectIdentityChanged)
 	}
 	oldPath, err := origin.projectPath(project.WebURL, false)
 	if err != nil || (project.PathWithNamespace != "" && oldPath != project.PathWithNamespace) {
-		return "", fmt.Errorf("app: project origin invalid: %w", errProjectIdentityChanged)
+		return "", nil, fmt.Errorf("app: project origin invalid: %w", errProjectIdentityChanged)
 	}
 	webPath, err := origin.projectPath(current.WebURL, false)
 	if err != nil || webPath != current.PathWithNamespace {
-		return "", fmt.Errorf("app: project web URL invalid: %w", errProjectIdentityChanged)
+		return "", nil, fmt.Errorf("app: project web URL invalid: %w", errProjectIdentityChanged)
 	}
 	remote := current.HTTPURLToRepo
 	if remote == "" {
@@ -441,9 +450,9 @@ func currentProjectRemote(ctx context.Context, client GitLabClient, project *sto
 	}
 	clonePath, err := origin.projectPath(remote, true)
 	if err != nil || clonePath != current.PathWithNamespace {
-		return "", fmt.Errorf("app: project clone URL invalid: %w", errProjectIdentityChanged)
+		return "", nil, fmt.Errorf("app: project clone URL invalid: %w", errProjectIdentityChanged)
 	}
-	return remote, nil
+	return remote, current, nil
 }
 
 // ProjectExtensionResolver builds and caches project-scoped review inputs:

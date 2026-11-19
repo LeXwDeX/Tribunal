@@ -74,6 +74,9 @@ type ReviewStore interface {
 	dag.EventStore
 	GetProject(ctx context.Context, id int64) (*store.Project, error)
 	ListProjects(ctx context.Context) ([]store.Project, error)
+	// UpdateProjectDefaultBranch follows a default branch change reported by
+	// GitLab; it only writes while the row still holds previous.
+	UpdateProjectDefaultBranch(ctx context.Context, id int64, previous, next string) (bool, error)
 	GetJob(ctx context.Context, id string) (*store.Job, error)
 	GetReviewControl(ctx context.Context, projectID, mrIID int64) (*store.ReviewControl, error)
 	ActivateReviewCandidate(ctx context.Context, activation store.ReviewCandidateActivation) (string, int64, error)
@@ -176,6 +179,12 @@ type ReviewService struct {
 	now               func() time.Time
 	cancelPoll        time.Duration
 	cancelWait        time.Duration
+	// queue schedules the workspace refresh that follows a default branch
+	// change found during a run; nil skips the refresh, not the synchronization.
+	queue JobEnqueuer
+	// targetGraphs indexes a review's base commit into a private code graph when
+	// the shared workspace index describes another commit; nil turns it off.
+	targetGraphs targetGraphBuilder
 }
 
 // ReviewServiceConfig configures ReviewService.
@@ -217,6 +226,9 @@ type ReviewServiceConfig struct {
 	Now               func() time.Time
 	CancelPoll        time.Duration
 	CancelWait        time.Duration
+	// Queue is optional. It schedules the workspace refresh that follows a
+	// default branch change found during a review run.
+	Queue JobEnqueuer
 }
 
 // NewReviewService validates dependencies and builds the F1/F2 service.
@@ -309,6 +321,8 @@ func NewReviewService(cfg ReviewServiceConfig) (*ReviewService, error) {
 		now:            now,
 		cancelPoll:     poll,
 		cancelWait:     wait,
+		queue:          cfg.Queue,
+		targetGraphs:   newTargetGraphBuilder(cfg.Git),
 	}, nil
 }
 
@@ -800,7 +814,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 	}
 	defer execution.releaseResolverSet()
 	defer execution.cleanupRepositorySkills()
-	var head, baseDir, workspaceIdentity, baseIdentity, indexSHA string
+	var head, baseDir, workspaceIdentity, baseIdentity, indexSHA, indexSource string
 	var indexEligible bool
 	var cleanup func()
 	prepare := func() error {
@@ -836,6 +850,39 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		if err != nil {
 			return err
 		}
+		indexSource = ""
+		if indexEligible {
+			indexSource = review.IndexSourceWorkspace
+		}
+		return nil
+	}
+	// ensureGraph gives the review base a code graph of its own when the shared
+	// index follows another commit. It is called only where the graph is used
+	// (a resumed dossier that relied on it, or a new dossier with files), so an
+	// empty or unusable run never pays for an index. The graph is closed by a
+	// deferred call registered after the checkout cleanup, so it runs first.
+	var graph *targetGraph
+	graphTried := false
+	ensureGraph := func() error {
+		if indexEligible || graphTried || head == "" {
+			return nil
+		}
+		graphTried = true
+		if baseDir != "" && s.canBuildTargetGraph(execution, cfg.Settings.Ignore) {
+			// An index can take minutes, and a successor generation may own this
+			// MR by now. Do not start one for a run that is no longer current.
+			if _, err := s.currentControl(ctx, project.ID, control.MRIID, payload.Generation, payload.HeadSHA); err != nil {
+				return err
+			}
+		}
+		built, err := s.useTargetGraph(ctx, project, ws, execution, job.ID, baseDir, inputs.Version.StartSHA, cfg.Settings.Ignore)
+		if err != nil {
+			return err
+		}
+		if built != nil {
+			graph = built
+			indexSHA, indexEligible, indexSource = strings.ToLower(inputs.Version.StartSHA), true, review.IndexSourceRun
+		}
 		return nil
 	}
 	// Terminal snapshots need publication checks, not a new worktree.
@@ -845,6 +892,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 			return err
 		}
 		defer cleanup()
+		defer func() { graph.Close() }()
 	}
 	var previous *review.Dossier
 	if workflow != nil {
@@ -865,7 +913,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 			if err := review.ValidateDossier(previous); err != nil {
 				changed = true
 			}
-			if !previous.WorkspaceProvenanceValid() || (resumable && previous.WorkspaceProvenance.MCPEligible && !indexEligible) {
+			if !previous.WorkspaceProvenanceValid() {
 				changed = true
 				workspaceChanged = true
 			}
@@ -882,6 +930,19 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 				!strings.EqualFold(previous.DiffVersion.StartSHA, inputs.Version.StartSHA) ||
 				!strings.EqualFold(previous.DiffVersion.HeadSHA, inputs.Version.HeadSHA) {
 				changed = true
+			}
+			if !changed && resumable && previous.WorkspaceProvenanceValid() && previous.WorkspaceProvenance.MCPEligible {
+				// The stored dossier promised a code graph. Every other check
+				// passed, so only a missing graph can still stop this workflow:
+				// rebuild it for this run before deciding the workspace changed.
+				// A workflow that is being replaced anyway never pays for one.
+				if err := ensureGraph(); err != nil {
+					return err
+				}
+				if !indexEligible {
+					changed = true
+					workspaceChanged = true
+				}
 			}
 		}
 		if changed {
@@ -934,6 +995,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 			return err
 		}
 		defer cleanup()
+		defer func() { graph.Close() }()
 	}
 	if !resumable {
 		// Filtering happens first so an excluded update does not cancel a review.
@@ -966,6 +1028,9 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 			}
 			return s.publishEmptyWithNote(ctx, project, token, control, payload.NoteID, inputs, cfg, summary, ignored)
 		}
+		if err := ensureGraph(); err != nil {
+			return err
+		}
 		provenance := &review.WorkspaceProvenance{Version: review.WorkspaceProvenanceVersion, TargetSHA: inputs.Version.StartSHA}
 		dossierWarnings := make([]string, 0, 3)
 		contextDoc, contextBase, contextFound := s.contextDoc(ctx, project.ID)
@@ -975,6 +1040,9 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 			dossierWarnings = append(dossierWarnings, withoutContextWarning)
 		}
 		provenance.IndexSHA, provenance.MCPEligible = indexSHA, indexEligible
+		if indexEligible {
+			provenance.IndexSource = indexSource
+		}
 		if config.ReviewIgnoreRestricted(cfg.Settings.Ignore) && !indexEligible {
 			dossierWarnings = append(dossierWarnings, withoutCodeGraphWarning)
 		}

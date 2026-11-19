@@ -72,6 +72,9 @@ const (
 	ReasonRepositoryNotFound = "repository_not_found"
 	ReasonRefNotFound        = "ref_not_found"
 	ReasonNetwork            = "network"
+	// ReasonWorktreeRegistered reports a worktree target that git still has
+	// registered after its directory was removed.
+	ReasonWorktreeRegistered = "worktree_registered"
 )
 
 func (e *Error) Error() string {
@@ -148,6 +151,7 @@ var gitStderrMarkers = []struct {
 	marker string
 	reason string
 }{
+	{"missing but already registered worktree", ReasonWorktreeRegistered},
 	{"couldn't find remote ref", ReasonRefNotFound},
 	{"returned error: 401", ReasonAuth},
 	{"authentication failed", ReasonAuth},
@@ -505,7 +509,9 @@ func (g *Git) Fetch(ctx context.Context, mirror string, a Auth, refspecs ...stri
 	return err
 }
 
-// AddWorktree creates a detached worktree for sha at dir.
+// AddWorktree creates a detached worktree for sha at dir. When git still has dir
+// registered although the directory is gone, as after a crash, the stale
+// registrations are pruned and the add is retried once.
 func (g *Git) AddWorktree(ctx context.Context, mirror, dir, sha string) error {
 	if err := validateAbsPath(mirror); err != nil {
 		return err
@@ -532,7 +538,18 @@ func (g *Git) AddWorktree(ctx context.Context, mirror, dir, sha string) error {
 	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
 		return fmt.Errorf("repo: create worktree parent: %w", err)
 	}
-	if _, err := g.run(ctx, "add worktree", mirror, Auth{}, "worktree", "add", "--detach", "--", dir, sha); err != nil {
+	add := []string{"worktree", "add", "--detach", "--", dir, sha}
+	_, err = g.run(ctx, "add worktree", mirror, Auth{}, add...)
+	if ReasonOf(err) == ReasonWorktreeRegistered {
+		// The directory is gone (dir was checked above) but git still has it
+		// registered, as after a crash that removed the directory without
+		// removing the worktree. Drop the stale registrations and try once more.
+		if _, pruneErr := g.run(ctx, "prune worktrees", mirror, Auth{}, "worktree", "prune"); pruneErr != nil {
+			return pruneErr
+		}
+		_, err = g.run(ctx, "add worktree", mirror, Auth{}, add...)
+	}
+	if err != nil {
 		return err
 	}
 	if err := os.Chmod(dir, 0o700); err != nil {

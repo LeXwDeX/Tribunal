@@ -82,6 +82,8 @@ Web 控制台的“重试加载更多”复用失败请求的同一 cursor，不
 | `Note Hook` | `noteable_type=MergeRequest`、`action` 为空或 `create`，且 MR 未关闭；正文首行是 `/review`，或正文包含对 `gitlab.bot_usernames` 的 @ 提及 | 斜杠命令按 §6 入队；mention 入队 `review.command`（`trigger=mention`、`command=run`）；编辑注记不触发 |
 | `Push Hook` | `ref` 为目标分支（默认分支或设置中的分支） | `workspace.refresh` |
 
+载荷里的 `project.default_branch` 是合法分支名且与存储值不同时，入口在处理事件前另入队一次 `workspace.refresh`（trigger `default_branch_changed`，投递事件 `Default Branch Refresh`，同一项目、同一报告分支每分钟至多一次），它只是提示，存储值仍由刷新读取 GitLab 后更新，事件自身的过滤结果不变，见[默认分支同步](../operations.md#默认分支同步)。
+
 `catch_up` 不来自 webhook：服务启动恢复完成后，追赶扫描对每个打开的 MR 的当前 head 构造同样的合成事件，经上表相同的过滤与入队路径入队（投递事件为 `Catch Up`，UUID 由项目、MR 和 head 确定，同一 head 至多补评一次），见[运维文档](../operations.md#启动追赶扫描)。该值也出现在评审列表的 `trigger` 字段和筛选中。
 
 `review.run` 的 job key：`review:<project_id>:<mr_iid>`。去重记录与入队在同一事务中提交，新 webhook 就地替换同 key、同 kind 的 queued 内容；running 内容不变，允许保留一个 queued 后继。取消任务使用独立 key `review.cancel:<project_id>:<mr_iid>`。工作流取消由评审处理器负责（见 05-flows.md F2）；webhook handler 本身不执行评审。

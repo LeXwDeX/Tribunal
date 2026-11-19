@@ -415,16 +415,20 @@ data/workspaces/<project_id>/
   skills/                   项目级 Skill
   mcp.json                  项目级 MCP 配置
   runs/<id>/                每个 MR 的临时 worktree，评审通常使用 job ID，结束后清理
+  graphs/<runID>/           评审的目标图谱（共享索引不能证明就是目标提交时才建），评审结束即删除
 ```
 
 | 时机 | 动作 |
 |---|---|
 | 项目注册 | 运行一次 **onboarding 工作流**（本身也是一个 DAG）：clone → 建索引 → 生成上下文文档 |
 | 目标分支有新 push（Push Hook） | 刷新 mirror、`base/` 和索引；变更量超过阈值或距上次生成超过设定时间时，重新生成上下文文档 |
-| MR 评审 | worktree 检出 head；上下文文档和索引使用 base 版本 |
-| 定期 | 清理过期的 `context/<sha>/` 和遗留的 `runs/` |
+| 手动刷新、启动追赶、默认分支变化 | 刷新项目默认分支：执行时先与 GitLab 同步默认分支，再刷新 `base/` 和索引；push 触发的刷新仍取 push 的分支（推的正是刚被取代的旧默认分支时取新默认分支） |
+| MR 评审 | worktree 检出 head；上下文文档和索引使用 base 版本；共享索引不能证明就是目标提交时，另为本次评审的 base 建隔离的目标图谱（见 §8.4） |
+| 定期 | 清理过期的 `context/<sha>/`、遗留的 `runs/` 和崩溃遗留的 `graphs/` |
 
-同一工作区的刷新与评审通过工作区级读写锁协调：刷新持写锁，评审持读锁；评审所用的 base 快照在工作流开始时固定。
+项目的默认分支（`projects.default_branch`）在登记时写入，之后随 GitLab 自动同步：工作区刷新、onboarding 和每次评审准备读取 GitLab 项目时，GitLab 报告的默认分支合法且与存储值不同，就更新存储；评审准备发现变化时另排队一次刷新，让 `base/` 与索引跟上新默认分支；webhook 入口不请求 GitLab，但事件载荷里的 `project.default_branch` 是合法分支名且与存储值不同时，同样排队一次刷新（载荷只是提示，存储值仍由刷新读取 GitLab 后更新）。它同时是未配置 `target_branches` 时评审 MR 和触发 push 刷新所用的目标分支，同步后按新默认分支生效。规则与限制见[运维手册的默认分支同步](docs/operations.md#默认分支同步)。
+
+同一工作区的刷新与评审通过工作区级读写锁协调：刷新持写锁，评审持读锁；评审所用的 base 快照在工作流开始时固定，评审的目标图谱也在这把读锁内建立和使用。
 
 ### 8.2 上下文文档（生成的 AGENTS.md / CLAUDE.md）
 
@@ -471,11 +475,12 @@ data/workspaces/<project_id>/
 - MCP server 的 `--tool-profile=analysis|scout` 提供受限工具面。analysis 为 13 个、scout 为 8 个，均不含 `index_repository`、`delete_project`、`ingest_traces`、`manage_adr` 四个写入/管理工具。2026-10-25 的 Linux/amd64 容器探针已验证 analysis 的 `list_projects` 调用成功，直接调用未公开的 `delete_project` 在工具层被拒绝；不把一次负向调用推广为全部工具的安全证明。
 - CLI 的 `--tool-profile` 不限制本地 CLI 工具调用；不要把 MCP profile 当作 CLI 沙箱。
 - onboarding 阶段用 `cli` 模式建索引，不必由应用建立 MCP 会话；0.12.1 的 CLI 仍会使用上游 daemon。
-- 用 [MCP 隔离启动脚本](scripts/codebase-memory-mcp.sh) 同时启动 server 和索引命令。脚本在项目 `HOME` 下分别设置 `CBM_CACHE_DIR` 和 `CBM_RUNTIME_DIR`；仅设置 `HOME` 或 `XDG_RUNTIME_DIR` 不能隔离默认的账号级 daemon。完整配置与部署要求见 [MCP 配置](docs/design/06-config.md#2-mcp-配置文件)。
+- 用 [MCP 隔离启动脚本](scripts/codebase-memory-mcp.sh) 同时启动 server 和索引命令。脚本在项目 `HOME` 下设置 `CBM_CACHE_DIR`；`CBM_RUNTIME_DIR` 在 `$HOME/run` 不超过 57 字节时同样放在 `HOME` 下，更长时改用 `/tmp/tcbm-<uid>/<HOME 的 SHA-256 前 16 位>`，因为 0.12.1 在运行时目录下建 unix socket，路径超过约 60 字节时所有调用（含 `cli index_repository`）都会失败。标准镜像布局下 `$HOME/run` 为 52 到 57 字节（项目 ID 不超过 6 位），仍放在 `HOME` 下；评审目标图谱的 `HOME` 路径更深，走这条回退。图谱数据与缓存始终在 `HOME` 内，只有协调文件移出，每个 `HOME` 仍有各自的运行时目录；仅设置 `HOME` 或 `XDG_RUNTIME_DIR` 不能隔离默认的账号级 daemon。完整配置与部署要求见 [MCP 配置](docs/design/06-config.md#2-mcp-配置文件)，运行时目录的细节见[图谱管理与排查](docs/operations.md#图谱管理与排查)。
 - 服务端部署时关闭 `auto_watch` / `watcher_enabled` 和 UI（默认端口 9749）。索引刷新由 Push Hook 驱动，UI 端口不对外暴露。
 - 索引只对 base 建。MR 改动的文件由 agent 在 worktree 中直接读取。prompt 中明确说明「图谱反映 base 版本，改动的文件以 worktree 为准」（借鉴 review agent 的 `check_index_coverage` 原则）。该规则写在 `prompts/_platform_rules.md`（v2），对所有绑定图谱工具的块生效；它改变了 prompt bundle hash，影响见 [prompt 覆盖](docs/design/06-config.md#6-prompt-覆盖)。
+- **目标图谱**（[#604](https://github.com/LeXwDeX/Tribunal/issues/604)）：共享工作区索引（`workspaces.index_sha`）只跟随一个提交，不能证明就是评审的目标提交（MR diff 的 `start_sha`）时（主要是 `index_sha` 与目标提交不一致，例如 MR 的目标分支不是默认分支），评审在准备阶段持工作区读锁，为本次评审的 base checkout 在 `graphs/<runID>/` 下建一份只属于这次评审的图谱。它用一个只含带 `index_command` 的 stdio 服务器、以该目录为工作区的独立 MCP manager 运行索引命令，这些服务器的 `HOME` 和图谱只含这一份；它们的工具从这个 manager 绑定，其他 MCP 服务器仍走项目共享 manager。生命周期等同一次评审：结束时先关闭 manager 再删除目录，不跨评审缓存，崩溃遗留由 run cleanup 回收。有效 ignore 受限，或带索引命令的服务器中有 http 类型时不建。资格证明不放宽：索引 SHA 仍须等于目标提交，dossier 的 `workspace_provenance.index_source` 记录来源（`workspace` 为共享索引，`run` 为目标图谱）。建不出来或超时不使评审失败，按原规则不提供已绑定的图谱工具并记录 `tool_gaps`（PASS 降为 INCOMPLETE）。每次需要目标图谱的评审都会完整索引一次 base（占用 CPU、磁盘和时间，等待并发名额最长 5 分钟、取得名额后索引最长 10 分钟，进程内最多 2 个同时运行，同一提交的可降级失败 15 分钟内不重试）；共享索引已跟上的默认分支 MR 不额外索引。运行时行为与排查见[运维手册](docs/operations.md#目标提交代码图谱)，配置规则见[配置设计](docs/design/06-config.md#目标提交代码图谱)。
 
-- **索引按路径识别项目**：codebase-memory 以「项目名 + 根路径」标识索引。因此 `base/` 的路径必须**按项目固定**（`data/workspaces/<project_id>/base`），刷新时在原目录内 fetch + checkout，**不重新 clone、不换目录**，索引就能一直复用并增量更新。MR 的 worktree 路径每次不同，不建索引。
+- **索引按路径识别项目**：codebase-memory 以「项目名 + 根路径」标识索引。因此 `base/` 的路径必须**按项目固定**（`data/workspaces/<project_id>/base`），刷新时在原目录内 fetch + checkout，**不重新 clone、不换目录**，索引就能一直复用并增量更新。MR 的 worktree 路径每次不同，不建索引。评审的目标图谱不改变这一点：它索引的是本次评审自己的 base checkout（不是 head worktree），在独立的 `HOME` 里现建现用，评审结束即整体删除，所以不依赖固定路径来复用。
 - **工作区主键用 GitLab `project_id`**：项目改名或转移 namespace 后 git 地址会变，但 `project_id` 不变；git 地址只作为属性记录，变化时更新 mirror 的 remote，不重建工作区。
 - **未来方向**：推动 codebase-memory 支持以仓库身份（规范化的 git remote 地址或 `project_id`）作为索引 key，与路径解耦，使同一仓库在不同路径（如多实例、迁移数据目录）下可直接复用索引。见 §16 Q18。
 

@@ -206,6 +206,12 @@ func (s *WebhookService) Handle(ctx context.Context, req WebhookRequest) (Webhoo
 	if reason := checkEventKind(req.Event, payload.ObjectKind); reason != "" {
 		return s.recordIgnored(ctx, project.ID, req.Event, parsedUUID.String(), mrIID, reason)
 	}
+	// The stored default branch decides below which events are reviewed and the
+	// ingress cannot ask GitLab, so a payload that reports another default
+	// branch queues the refresh that verifies and adopts it (#604). It is
+	// recorded first: a queued push refresh from this same event replaces it
+	// and still synchronizes the default when it runs.
+	s.requestDefaultBranchRefresh(ctx, project, payload)
 	// Ingress only records the delivery and the generation bump; it performs no
 	// remote call and must finish inside the 900ms HTTP processing budget, so it
 	// deliberately does not take the per-MR lock. The remote note order is kept

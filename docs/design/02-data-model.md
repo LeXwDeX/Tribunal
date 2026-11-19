@@ -45,7 +45,7 @@ CREATE TABLE projects (
   id                  INTEGER PRIMARY KEY,          -- GitLab project_id
   path_with_namespace TEXT    NOT NULL,
   web_url             TEXT    NOT NULL,
-  default_branch      TEXT    NOT NULL,
+  default_branch      TEXT    NOT NULL,             -- 登记时写入，之后随 GitLab 同步（#604）；仅在存储值仍是旧值时更新，不改变 revision
   token_enc           BLOB    NOT NULL,             -- AES-GCM: "\x00tb1" || nonce || ciphertext，AAD 绑定项目 ID 与字段
   token_expires_at    TEXT,
   token_scopes        TEXT    NOT NULL DEFAULT '[]',-- JSON 数组，注册时从 GitLab 读取
@@ -536,4 +536,4 @@ SQLite 必要的 PRAGMA：`journal_mode=WAL`、`busy_timeout=5000`、`foreign_ke
 
 > 本地验收口径（2026-10-23 用户确认）：维持上表策略。每个 `(project, kind)` 保留 5 个未锁定且非 active 的历史版本；active 版本和所有 locked 版本额外保护，总数可以超过 5。不扩大删除范围。
 
-> 工作区文件清理与数据库保留是两条路径。run cleanup 在每小时任务中删除超过 `workspace.run_cleanup_after`（默认 1h）的 `context/<sha>` 目录，但必须保留所有 `context_docs` 记录引用的 base SHA、workspace 的 `base_sha`/`context_sha`、未终态 workflow 的 base，以及 `publication_state=pending` dossier 的 base。目录 metadata 标记 locked、缺失或非法时保留该目录并记录错误（fail closed）。只有查询保护集合成功后，才允许触碰项目文件。
+> 工作区文件清理与数据库保留是两条路径。run cleanup 在每小时任务中删除超过 `workspace.run_cleanup_after`（默认 1h）的 `context/<sha>` 目录，但必须保留所有 `context_docs` 记录引用的 base SHA、workspace 的 `base_sha`/`context_sha`、未终态 workflow 的 base，以及 `publication_state=pending` dossier 的 base。目录 metadata 标记 locked、缺失或非法时保留该目录并记录错误（fail closed）。同一轮清理在项目写锁内还会删除 `graphs/` 下崩溃残留的评审目标图谱目录：评审结束时自行删除 `graphs/<runID>`，且整个 run 期间持工作区读锁，所以写锁下仍存在的目录是进程崩溃遗留；只有早于同一阈值、run ID 不在 run 保护集合（未终态 workflow、queued/running job、`publication_state=pending` 的 dossier）且不是本进程注册 run 的目录才删除，符号链接、普通文件和名称不是合法 run ID 的条目保留，`run cleanup finished` 日志用 `removed_graphs` 记数。只有查询保护集合成功后，才允许触碰项目文件。

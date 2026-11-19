@@ -325,6 +325,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 	allowedProviders := providerNames(cfg.Providers)
 	reviews, err := NewReviewService(ReviewServiceConfig{
 		Store:             deps.Store,
+		Queue:             deps.Store,
 		GitLab:            deps.GitLab,
 		Cipher:            deps.Cipher,
 		SharedBotToken:    deps.SharedBotToken,
