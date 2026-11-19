@@ -500,7 +500,7 @@ default_extensions:
           query_graph, get_graph_schema, get_file_outline, get_architecture, search_code, check_index_coverage]
         review: *read_tools
         explore: *read_tools
-        validate: &verify_tools [get_code_snippet, search_graph, trace_path, search_code]
+        validate: &verify_tools [list_projects, get_code_snippet, search_graph, trace_path, search_code]
         verify: *verify_tools
         onboarding:  [get_architecture, get_graph_schema]
 ```
@@ -514,8 +514,8 @@ default_extensions:
 | `code-review` | 11 项只读工具（见下） | 单次双轴评审需要跨文件定位定义、调用链和既有实现，以验证 diff 内外的判断。 |
 | `review` | 与 `code-review` 相同 | `rv.<pkg>` 终审通道同样需要只读图谱证据，避免只凭 diff 猜测上下文。 |
 | `explore` | 与 `code-review` 相同（11 项） | 只读探索要查定义、调用方、配置和测试，需要完整的只读检索面。 |
-| `validate` | `get_code_snippet`、`search_graph`、`trace_path`、`search_code` | 验证通道读代码与测试，对照 pipeline 证据；不授予探索或架构概览工具。 |
-| `verify` | `get_code_snippet`、`search_graph`、`trace_path`、`search_code` | 核对一条 finding 只需读取片段、查找定义与调用链、搜索用法；不授予探索或架构概览工具。 |
+| `validate` | `list_projects`、`get_code_snippet`、`search_graph`、`trace_path`、`search_code` | 验证通道读代码与测试，对照 pipeline 证据；`list_projects` 用来取得本次评审图谱的 project 名（目标图谱每次评审不同）；不授予探索或架构概览工具。 |
+| `verify` | `list_projects`、`get_code_snippet`、`search_graph`、`trace_path`、`search_code` | 核对一条 finding 只需取得 project 名、读取片段、查找定义与调用链、搜索用法；不授予探索或架构概览工具。 |
 | `onboarding` | `get_architecture`、`get_graph_schema` | 建立项目画像需要架构概览和图 schema；逐点检索、覆盖检查留给评审块。 |
 | `reasoner` | 无 | 只审查设计声明和已有材料，不直接检索代码图谱；管理员可按需绑定。 |
 | `synthesize` | 无 | 只消费结构化 finding 和 challenge 结果，不直接检索。 |
