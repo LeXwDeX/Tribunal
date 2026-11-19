@@ -78,12 +78,12 @@ web/
 | 区块 | 内容 | API |
 |---|---|---|
 | 头部 | MR 标题与链接、head sha、档位、触发方式、状态、结论、项目 `access`；操作按 `manage` 显示取消、重新发布、在 GitLab 中打开 | `GET /reviews/{id}` |
-| 未完成原因/评审诊断 | INCOMPLETE 评审或存在警告/未解决信号时显示「未完成原因」/「评审诊断」面板，展示 review 级 `summary`、`warnings`、`unresolved` 与 dossier 的 `material_warnings`（评审材料降级：受限 ignore、上下文未校验、base 不可用、背景截断）；结论卡片区分未评审、评审失败与已审范围 | `GET /reviews/{id}` |
+| 未完成原因/评审诊断 | INCOMPLETE 评审或存在警告/未解决信号时显示「未完成原因」/「评审诊断」面板，展示 review 级摘要（优先用 `summary_text`，缺失时用 `summary`）、告警（优先用 `warnings_text`，缺失时用 `warnings`）、`unresolved` 与 dossier 的 `material_warnings`（评审材料降级：受限 ignore、上下文未校验、base 不可用、背景截断）。未解决信号按 `category` 带徽标：「工具不可用」（中性色）、「证据缺口」「评审阻断」，未知分类显示「未解决信号」；分类与中文说明（`text`，缺失时用 `message`）相同的信号合并为一行，列出涉及的节点 ID，存储的原始 `message` 收在该行折叠的「技术详情」中（仅当原文与显示文字不同时出现）。`warnings_text` 为空数组表示告警都已由未解决信号显示，此时不显示「告警」区；响应缺少这些字段时按 `kind`、`message`、`summary`、`warnings` 显示。结论卡片区分未评审、评审失败与已审范围 | `GET /reviews/{id}` |
 | 评审范围 | 有 `scope` 时显示全量/增量、上次→本次 head、覆盖文件数、无法定位问题数；`generated_files > 0` 时显示跳过的生成文件数量与路径（最多 12 条）。只展示 API 返回的字段，旧评审没有 `scope` 时不推断为全量 | `GET /reviews/{id}` |
 | DAG 视图 | 按层排列节点，颜色表示状态，点击打开节点抽屉 | `GET /reviews/{id}/graph` + SSE |
 | Findings | 表格：级别、标题、文件:行、来源（节点 / provider）、挑战结果、处置、处置理由；可按处置和级别过滤；展开看正文、证据和人工标注 | `GET /reviews/{id}/findings`、`PUT .../findings/{finding_id}/annotation` |
 | 发布 | `publication_state`、脱敏的 `publication_error`、汇总评论链接、行内讨论数量、commit status；failed 可重试，pending 等待发布完成（启动恢复或手动重试），skipped 显示原因且不重发 | 详情中的 `publication_state`、`publication_error`、`publications` |
-| 节点抽屉 | 参数、输出 JSON、错误、节点 `reason`/`token_free`、每轮 LLM 调用（用量、耗时、stop reason，可展开请求和响应）；skipped 节点显示 `reason` 而不显示红色错误框；空调用列表区分代码节点与「明细已按保留策略删除」，并显示保留小时数与截止时间 | `GET /reviews/{id}/nodes/{node}`、`.../calls` |
+| 节点抽屉 | 参数、输出 JSON、错误、节点 `reason`/`token_free`、每轮 LLM 调用（用量、耗时、stop reason，可展开请求和响应）；skipped 节点显示 `reason` 而不显示红色错误框；节点 `reason` 显示为中文提示并在括号内保留原因代码（如 `unsafe_model_response`、`unsatisfied` 和各类取消原因），未收录的原因显示「节点未完成（原因代码：…）」；空调用列表区分代码节点与「明细已按保留策略删除」，并显示保留小时数与截止时间 | `GET /reviews/{id}/nodes/{node}`、`.../calls` |
 
 `publications.commit_status` 仅含 `success`/`failed`；旧发布键没有状态时为 unknown，界面显示不可用。
 

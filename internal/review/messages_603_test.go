@@ -6,8 +6,12 @@ import (
 )
 
 const (
-	indexIdentityLabel = "代码图谱索引提交与本 MR 目标提交不一致，本次未启用代码图谱工具，相关范围可能未被完整评审。"
-	genericToolLabel   = "部分评审工具不可用，相关范围可能未被完整评审。"
+	// indexMismatchLabel is used only when both commits are known and differ.
+	indexMismatchLabel = "代码图谱索引（abcdef01）与本 MR 目标提交（33333333）不一致，本次未启用代码图谱工具，相关范围可能未被完整评审。"
+	// indexUnconfirmedLabel is used when the identity cannot be confirmed but
+	// no mismatch is proven: equal commits, a missing commit, or no commit at all.
+	indexUnconfirmedLabel = "无法确认代码图谱索引与本 MR 目标提交一致（工作区索引未就绪或索引失败），本次未启用代码图谱工具，相关范围可能未被完整评审。"
+	genericToolLabel      = "部分评审工具不可用，相关范围可能未被完整评审。"
 )
 
 func TestLocalizeToolGapNamesTheIndexIdentityCause(t *testing.T) {
@@ -17,19 +21,49 @@ func TestLocalizeToolGapNamesTheIndexIdentityCause(t *testing.T) {
 		want    string
 	}{
 		{
-			name:    "collapsed gap of one node",
+			name:    "collapsed gap of one node with differing commits",
 			message: "block code-review: MCP tools unavailable: 7 bound tool(s) blocked by workspace index identity (index abcdef01, target 33333333)",
-			want:    indexIdentityLabel,
+			want:    indexMismatchLabel,
 		},
 		{
 			name:    "collapsed gap with the node prefix of a warning",
-			message: "cr.p1: block code-review: MCP tools unavailable: 7 bound tool(s) blocked by workspace index identity (index unknown, target unknown)",
-			want:    indexIdentityLabel,
+			message: "cr.p1: block code-review: MCP tools unavailable: 7 bound tool(s) blocked by workspace index identity (index abcdef01, target 33333333)",
+			want:    indexMismatchLabel,
 		},
 		{
-			name:    "per-tool gap stored by an older workflow",
+			name:    "unknown index and target never claim a mismatch",
+			message: "cr.p1: block code-review: MCP tools unavailable: 7 bound tool(s) blocked by workspace index identity (index unknown, target unknown)",
+			want:    indexUnconfirmedLabel,
+		},
+		{
+			name:    "unknown index with a known target",
+			message: "block code-review: MCP tools unavailable: 3 bound tool(s) blocked by workspace index identity (index unknown, target 33333333)",
+			want:    indexUnconfirmedLabel,
+		},
+		{
+			name:    "known index with an unknown target",
+			message: "block code-review: MCP tools unavailable: 3 bound tool(s) blocked by workspace index identity (index abcdef01, target unknown)",
+			want:    indexUnconfirmedLabel,
+		},
+		{
+			name:    "equal commits mean the workspace was not ready, not a mismatch",
+			message: "block review: MCP tools unavailable: 3 bound tool(s) blocked by workspace index identity (index 33333333, target 33333333)",
+			want:    indexUnconfirmedLabel,
+		},
+		{
+			name:    "equal commits differing only in letter case",
+			message: "block review: MCP tools unavailable: 3 bound tool(s) blocked by workspace index identity (index ABCDEF01, target abcdef01)",
+			want:    indexUnconfirmedLabel,
+		},
+		{
+			name:    "an index that is not a commit id is not reported as a commit",
+			message: "block review: MCP tools unavailable: 3 bound tool(s) blocked by workspace index identity (index bad, target 33333333)",
+			want:    indexUnconfirmedLabel,
+		},
+		{
+			name:    "per-tool gap stored by an older workflow has no commits",
 			message: `block explore: MCP tools unavailable: tool "mcp__codebase-memory__search_graph" blocked by workspace index identity`,
-			want:    indexIdentityLabel,
+			want:    indexUnconfirmedLabel,
 		},
 		{
 			name:    "other unavailable tools keep the generic label",
@@ -68,7 +102,7 @@ func TestIncompleteSummaryListsIndexIdentityCauseOnce(t *testing.T) {
 	if !ok {
 		t.Fatal("summary was not localized")
 	}
-	if got := strings.Count(text, indexIdentityLabel); got != 1 {
+	if got := strings.Count(text, indexMismatchLabel); got != 1 {
 		t.Fatalf("summary lists the index identity cause %d times, want once:\n%s", got, text)
 	}
 	if strings.Contains(text, "另有") || strings.Contains(text, genericToolLabel) {

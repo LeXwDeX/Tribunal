@@ -42,6 +42,22 @@ var (
 	gitlabNotCollectedGapRE = regexp.MustCompile(`^diff collection is marked incomplete by GitLab \(the diff version is not collected\): (\d+) changed file\(s\) were provided; whether every changed file was reviewed cannot be proven$`)
 	generatedNoReviewRE     = regexp.MustCompile(`^no reviewable files: (\d+) generated file\(s\) were skipped$`)
 	outOfScopeSevereRE      = regexp.MustCompile(`^incremental review ignored a (P0|P1) finding outside the reviewed file set: (.+)$`)
+	// indexIdentityGapRE reads the commits a collapsed index identity gap names.
+	// Each is a short commit id or "unknown".
+	indexIdentityGapRE = regexp.MustCompile(`blocked by workspace index identity \(index ([^\s,)]+), target ([^\s,)]+)\)`)
+	shortCommitRE      = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
+	// collapsedNodeRE matches the node of a summary item that stands for several
+	// nodes with the same cause: "<first node> 等 <n> 个节点".
+	collapsedNodeRE = regexp.MustCompile(`^(\S+) 等 \d+ 个节点$`)
+)
+
+const (
+	// toolGapMarker identifies a gap recorded when bound MCP tools could not be
+	// used. The executor writes it as "block <block>: MCP tools unavailable: ...".
+	toolGapMarker = "MCP tools unavailable"
+
+	indexMismatchFormat  = "代码图谱索引（%s）与本 MR 目标提交（%s）不一致，本次未启用代码图谱工具，相关范围可能未被完整评审。"
+	indexUnconfirmedText = "无法确认代码图谱索引与本 MR 目标提交一致（工作区索引未就绪或索引失败），本次未启用代码图谱工具，相关范围可能未被完整评审。"
 )
 
 // kindLabels names review channels and coverage checks without exposing the
@@ -258,12 +274,33 @@ func localizeMachineMessage(message string) (string, bool) {
 		return "部分问题的二次验证未完成，已按存疑处理。", true
 	case strings.Contains(message, "blocked by workspace index identity"):
 		// More specific than the generic tool gap below. Older workflows stored
-		// one gap per tool with the same cause.
-		return "代码图谱索引提交与本 MR 目标提交不一致，本次未启用代码图谱工具，相关范围可能未被完整评审。", true
-	case strings.Contains(message, "MCP tools unavailable"):
+		// one gap per tool with the same cause and no commits.
+		return localizeIndexIdentityGap(message), true
+	case strings.Contains(message, toolGapMarker):
 		return "部分评审工具不可用，相关范围可能未被完整评审。", true
 	}
 	return "", false
+}
+
+// localizeIndexIdentityGap words the index identity gap by what is proven. Only
+// two known commits that differ prove a mismatch; equal commits, an unknown
+// commit or a legacy gap without commits only show that the identity could not
+// be confirmed, for example because the workspace was not ready.
+func localizeIndexIdentityGap(message string) string {
+	if match := indexIdentityGapRE.FindStringSubmatch(message); match != nil {
+		index, target := match[1], match[2]
+		if shortCommitRE.MatchString(index) && shortCommitRE.MatchString(target) && !sameShortCommit(index, target) {
+			return fmt.Sprintf(indexMismatchFormat, index, target)
+		}
+	}
+	return indexUnconfirmedText
+}
+
+// sameShortCommit compares two abbreviated commit ids; one that is a prefix of
+// the other names the same commit.
+func sameShortCommit(a, b string) bool {
+	a, b = strings.ToLower(a), strings.ToLower(b)
+	return strings.HasPrefix(a, b) || strings.HasPrefix(b, a)
 }
 
 func kindLabel(kind string) string {
@@ -400,24 +437,23 @@ func looksMachineEnglish(value string) bool {
 	return words >= 2
 }
 
-// localizeIncompleteSummary rewrites the deterministic diagnostic summary into
-// 「已评审范围结论 + 中文未完成原因 + 下一步」. The original signal text stays in
-// the stored workflow and the console. It reports false for any other summary,
-// which is rendered unchanged.
-func localizeIncompleteSummary(summary string, inline, summaryOnly int) (string, bool) {
+// parseIncompleteSummary reads the deterministic summary built by
+// incompleteSummary. It returns the distinct Chinese reasons in their stored
+// order and the number of causes the stored summary cut off. It reports false
+// for any other summary.
+func parseIncompleteSummary(summary string) (reasons []string, extra int, ok bool) {
 	trimmed := strings.TrimSpace(summary)
 	if !strings.HasPrefix(trimmed, unresolvedSummaryPrefix) {
-		return "", false
+		return nil, 0, false
 	}
 	rest := strings.TrimPrefix(trimmed, unresolvedSummaryPrefix)
-	extra := 0
 	if index := strings.LastIndex(rest, "；另有 "); index >= 0 {
 		if count, err := strconv.Atoi(strings.TrimSuffix(rest[index+len("；另有 "):], " 项")); err == nil {
 			extra = count
 		}
 		rest = rest[:index]
 	}
-	reasons := make([]string, 0, 8)
+	reasons = make([]string, 0, 8)
 	seen := make(map[string]bool, 8)
 	for _, item := range strings.Split(rest, "；") {
 		item = strings.TrimSpace(item)
@@ -428,6 +464,9 @@ func localizeIncompleteSummary(summary string, inline, summaryOnly int) (string,
 		if index := strings.Index(item, ": "); index >= 0 {
 			node, message = item[:index], item[index+len(": "):]
 		}
+		if match := collapsedNodeRE.FindStringSubmatch(node); match != nil {
+			node = match[1]
+		}
 		text := localizeUnresolvedItem(node, message)
 		if !seen[text] {
 			seen[text] = true
@@ -436,6 +475,18 @@ func localizeIncompleteSummary(summary string, inline, summaryOnly int) (string,
 	}
 	if len(reasons) == 0 {
 		reasons = append(reasons, diagnosticFallback)
+	}
+	return reasons, extra, true
+}
+
+// localizeIncompleteSummary rewrites the deterministic diagnostic summary into
+// 「已评审范围结论 + 中文未完成原因 + 下一步」. The original signal text stays in
+// the stored workflow and the console. It reports false for any other summary,
+// which is rendered unchanged.
+func localizeIncompleteSummary(summary string, inline, summaryOnly int) (string, bool) {
+	reasons, extra, ok := parseIncompleteSummary(summary)
+	if !ok {
+		return "", false
 	}
 	if extra > 0 {
 		reasons = append(reasons, fmt.Sprintf("另有 %d 项检查未完成，详见控制台。", extra))

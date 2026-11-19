@@ -57,6 +57,13 @@ export interface UnresolvedSignal {
   node: string
   kind: string
   message: string
+  /**
+   * Console grouping category: `tool_unavailable` for a gap caused by an
+   * unavailable MCP tool, otherwise the kind. Absent in older responses.
+   */
+  category?: string
+  /** Chinese reading of `message`; equals the message when no template maps it. Absent in older responses. */
+  text?: string
 }
 
 export interface AdminUser {
@@ -333,7 +340,15 @@ export interface ReviewDetail extends ReviewSummary {
   fingerprint?: string
   /** Review-level diagnostics persisted with the synthesize node. */
   summary?: string
+  /** The incomplete summary as plain Chinese; present only for that summary. */
+  summary_text?: string
   warnings?: string[]
+  /**
+   * `warnings` in Chinese, merged by text with their nodes listed and without
+   * the causes `unresolved` already shows. An empty array means every warning
+   * repeated an unresolved signal; absent in older responses.
+   */
+  warnings_text?: string[]
   unresolved?: UnresolvedSignal[]
   /** Dossier review-material downgrades (restricted ignore, unverified context, missing base, truncated background). */
   material_warnings?: string[]
