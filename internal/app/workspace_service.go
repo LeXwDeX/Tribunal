@@ -503,7 +503,10 @@ func (s *WorkspaceService) onboardLocked(ctx context.Context, project *store.Pro
 	base := ws.BaseSHA()
 	if fetchBase || base == "" {
 		var err error
-		base, err = s.refreshBase(ctx, ws, project, token, project.DefaultBranch, "")
+		// An empty branch makes refreshBase use the default branch after it has
+		// been synchronized with GitLab; generateContext below reads the same
+		// project value.
+		base, err = s.refreshBase(ctx, ws, project, token, "", "")
 		if err != nil {
 			s.markWorkspaceError(ctx, project.ID, err)
 			return err
@@ -695,10 +698,14 @@ func (s *WorkspaceService) shouldRefreshContext(ctx context.Context, projectID i
 }
 
 func (s *WorkspaceService) refreshBase(ctx context.Context, ws *workspace.Workspace, project *store.Project, token, branch, ref string) (string, error) {
-	remote, err := currentProjectRemote(ctx, s.gitlab, project, token)
+	remote, current, err := currentProjectInfo(ctx, s.gitlab, project, token)
 	if err != nil {
 		return "", err
 	}
+	// The lookup above reports the live default branch. Follow a change before
+	// a branch is chosen below, so this refresh and the context generated from
+	// it use the new default instead of the registered one (#604).
+	syncDefaultBranch(ctx, s.store, s.logger, project, current)
 	auth := repo.Auth{Token: token}
 	if strings.TrimSpace(ref) == "" {
 		if strings.TrimSpace(branch) == "" {

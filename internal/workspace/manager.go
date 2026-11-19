@@ -1,6 +1,6 @@
 // Package workspace owns the platform's per-project checkout layout: a bare
-// mirror, a fixed base worktree, temporary run worktrees, context documents
-// and project-level skills.
+// mirror, a fixed base worktree, temporary run worktrees, per-review code graph
+// directories, context documents and project-level skills.
 //
 // The layout is fixed so external indexes (codebase-memory) can keep using
 // the same base path across refreshes. Worktrees are created from the local

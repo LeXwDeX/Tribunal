@@ -200,6 +200,7 @@ func (s *RunCleanupService) RunOnce(ctx context.Context) error {
 	var (
 		removedRuns     int
 		removedContexts int
+		removedGraphs   int
 		reclaimed       int
 	)
 	for _, pid := range projectIDs {
@@ -255,7 +256,7 @@ func (s *RunCleanupService) RunOnce(ctx context.Context) error {
 			}
 			continue
 		}
-		runs, contexts, err := s.cleanupWorkspace(ctx, ws, protected, protectedContext, cutoff)
+		runs, contexts, graphs, err := s.cleanupWorkspace(ctx, ws, protected, protectedContext, cutoff)
 		if maintenanceErr := s.maintainMirror(ctx, ws); maintenanceErr != nil {
 			err = errors.Join(err, maintenanceErr)
 		}
@@ -269,6 +270,7 @@ func (s *RunCleanupService) RunOnce(ctx context.Context) error {
 		unlock()
 		removedRuns += runs
 		removedContexts += contexts
+		removedGraphs += graphs
 		if err != nil {
 			errs = append(errs, err)
 		}
@@ -280,6 +282,7 @@ func (s *RunCleanupService) RunOnce(ctx context.Context) error {
 		"settled_dossiers", settledDossiers,
 		"removed_runs", removedRuns,
 		"removed_contexts", removedContexts,
+		"removed_graphs", removedGraphs,
 		"reclaimed_workspaces", reclaimed,
 		"errors", len(errs))
 	for _, err := range errs {
@@ -482,21 +485,45 @@ func directorySize(root string) (int64, error) {
 
 // cleanupWorkspace assumes the caller holds the workspace write lock. That
 // lock serializes deletion with prepareRun's read lock, which guards worktree
-// creation, and with context writers that share the same lock.
-func (s *RunCleanupService) cleanupWorkspace(ctx context.Context, ws *workspace.Workspace, protected, protectedContext map[string]struct{}, cutoff time.Time) (int, int, error) {
+// creation, and with context writers that share the same lock. It returns the
+// number of removed run worktrees, context versions and review graph
+// directories.
+func (s *RunCleanupService) cleanupWorkspace(ctx context.Context, ws *workspace.Workspace, protected, protectedContext map[string]struct{}, cutoff time.Time) (int, int, int, error) {
 	root, err := os.Lstat(ws.Root)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return 0, 0, nil
+		return 0, 0, 0, nil
 	case err != nil:
-		return 0, 0, fmt.Errorf("run cleanup: project %d: inspect workspace: %w", ws.ProjectID, err)
+		return 0, 0, 0, fmt.Errorf("run cleanup: project %d: inspect workspace: %w", ws.ProjectID, err)
 	case root.Mode()&os.ModeSymlink != 0 || !root.IsDir():
-		return 0, 0, fmt.Errorf("run cleanup: project %d: unsafe workspace root", ws.ProjectID)
+		return 0, 0, 0, fmt.Errorf("run cleanup: project %d: unsafe workspace root", ws.ProjectID)
 	}
 
 	runs, runErr := s.cleanupRuns(ctx, ws, protected, cutoff)
 	contexts, contextErr := ws.CleanupContextDirs(protectedContext, cutoff)
-	return runs, contexts, errors.Join(runErr, contextErr)
+	graphs, graphErr := s.cleanupGraphs(ws, protected, cutoff)
+	return runs, contexts, graphs, errors.Join(runErr, contextErr, graphErr)
+}
+
+// cleanupGraphs removes per-review code graph directories. A review removes its
+// own directory when it ends and holds the workspace read lock for its whole
+// run, so what the write lock finds is a leftover of a crashed process. A run
+// that is still protected in storage or registered in this process keeps its
+// directory, the same rule as for run worktrees.
+func (s *RunCleanupService) cleanupGraphs(ws *workspace.Workspace, protected map[string]struct{}, cutoff time.Time) (int, error) {
+	registered := ws.RegisteredRuns()
+	keep := make(map[string]struct{}, len(protected)+len(registered))
+	for runID := range protected {
+		keep[runID] = struct{}{}
+	}
+	for runID := range registered {
+		keep[runID] = struct{}{}
+	}
+	removed, err := ws.CleanupGraphDirs(keep, cutoff)
+	if err != nil {
+		err = fmt.Errorf("run cleanup: project %d: review graphs: %w", ws.ProjectID, err)
+	}
+	return removed, err
 }
 
 // cleanupRuns removes eligible worktrees. A missing runs directory is an

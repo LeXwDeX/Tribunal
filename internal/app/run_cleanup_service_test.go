@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -133,6 +134,24 @@ func (f *cleanupFixture) makeRun(t *testing.T, id string, mtime time.Time) strin
 	t.Helper()
 	dir := filepath.Join(f.runsDir, id)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(dir, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// makeGraph creates graphs/<id> with a nested file, the way a stdio server's
+// HOME fills a review's target graph directory.
+func (f *cleanupFixture) makeGraph(t *testing.T, id string, mtime time.Time) string {
+	t.Helper()
+	dir := filepath.Join(f.ws.GraphsDir(), id)
+	home := filepath.Join(dir, ".mcp", "graph", "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "index.db"), []byte("graph"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chtimes(dir, mtime, mtime); err != nil {
@@ -649,6 +668,126 @@ func TestNewRunCleanupServiceValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunCleanupRemovesOnlyAgedUnprotectedGraphDirs(t *testing.T) {
+	f := newCleanupFixture(t)
+	stale := f.makeGraph(t, "run-stale", f.old())
+	protected := f.makeGraph(t, "run-protected", f.old())
+	fresh := f.makeGraph(t, "run-fresh", f.now.Add(-time.Minute))
+	invalid := f.makeGraph(t, "bad name", f.old())
+	outside := t.TempDir()
+	canary := filepath.Join(outside, "keep")
+	if err := os.WriteFile(canary, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(f.ws.GraphsDir(), "run-linked")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	// Another project's graph directory is not this pass's business while its
+	// project is not listed.
+	otherProject := filepath.Join(filepath.Dir(f.ws.Root), "8", "graphs", "run-stale")
+	if err := os.MkdirAll(otherProject, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(otherProject, f.old(), f.old()); err != nil {
+		t.Fatal(err)
+	}
+
+	f.store.protected = map[string]struct{}{"run-protected": {}}
+	var logs strings.Builder
+	service := f.service(t)
+	service.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	if err := service.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	assertMissing(t, stale)
+	for _, path := range []string{protected, fresh, invalid, link, canary, otherProject} {
+		assertExists(t, path)
+	}
+	if got := f.git.removedPaths(); len(got) != 0 {
+		t.Fatalf("graph directories went through git worktree removal: %v", got)
+	}
+	if !strings.Contains(logs.String(), "removed_graphs=1") {
+		t.Fatalf("cleanup log does not report the removed graph directory: %s", logs.String())
+	}
+
+	if err := service.RunOnce(context.Background()); err != nil {
+		t.Fatalf("second RunOnce: %v", err)
+	}
+	assertExists(t, protected)
+}
+
+func TestRunCleanupProtectsGraphDirOfRegisteredRun(t *testing.T) {
+	root := t.TempDir()
+	manager := workspace.NewManager(root, &repo.Git{})
+	ws := manager.Get(7)
+	sha := initCleanupMirror(t, ws.MirrorDir())
+	runDir, cleanup, err := ws.NewRun(context.Background(), "job-registered", sha)
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
+	graph, err := ws.EnsureGraphDir("job-registered")
+	if err != nil {
+		t.Fatalf("EnsureGraphDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(graph, "index.db"), []byte("graph"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)
+	for _, dir := range []string{runDir, graph} {
+		if err := os.Chtimes(dir, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	service, err := NewRunCleanupService(RunCleanupConfig{
+		Store:     &cleanupTestStore{projects: []int64{7}, protected: map[string]struct{}{}},
+		Workspace: manager,
+		Git:       &cleanupTestGit{fail: map[string]error{}},
+		After:     time.Hour,
+		Now:       func() time.Time { return old.Add(2 * time.Hour) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	assertExists(t, graph)
+
+	// Once the run is no longer registered nothing protects the directory.
+	if err := cleanup(); err != nil {
+		t.Fatalf("run cleanup: %v", err)
+	}
+	if err := service.RunOnce(context.Background()); err != nil {
+		t.Fatalf("second RunOnce: %v", err)
+	}
+	assertMissing(t, graph)
+}
+
+func TestRunCleanupReportsUnsafeGraphsDirectoryAndKeepsCleaning(t *testing.T) {
+	f := newCleanupFixture(t)
+	orphan := f.makeRun(t, "orphan-old", f.old())
+	outside := t.TempDir()
+	child := filepath.Join(outside, "run-stale")
+	if err := os.Mkdir(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(child, f.old(), f.old()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, f.ws.GraphsDir()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.service(t).RunOnce(context.Background()); !errors.Is(err, workspace.ErrUnsafePath) {
+		t.Fatalf("RunOnce = %v, want the unsafe graphs directory reported", err)
+	}
+	assertExists(t, child)
+	assertMissing(t, orphan)
 }
 
 func initCleanupMirror(t *testing.T, mirror string) string {

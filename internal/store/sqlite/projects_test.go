@@ -316,6 +316,88 @@ func TestUpdateProjectWebhookHealthCompareAndSet(t *testing.T) {
 	}
 }
 
+// UpdateProjectDefaultBranch is a compare-and-set: it replaces the stored
+// default branch only while the row still holds the value the caller observed.
+func TestUpdateProjectDefaultBranchCompareAndSet(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	s := openTestStore(t, clock)
+	mustProject(t, s, 42)
+	mustProject(t, s, 43)
+	before, err := s.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+
+	clock.Advance(time.Minute)
+	applied, err := s.UpdateProjectDefaultBranch(ctx, 42, "main", "develop")
+	if err != nil || !applied {
+		t.Fatalf("matching update = %v, %v; want applied", applied, err)
+	}
+	saved, err := s.GetProject(ctx, 42)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if saved.DefaultBranch != "develop" {
+		t.Fatalf("default branch = %q, want develop", saved.DefaultBranch)
+	}
+	if !saved.UpdatedAt.After(before.UpdatedAt) {
+		t.Fatalf("updated_at %v did not advance past %v", saved.UpdatedAt, before.UpdatedAt)
+	}
+	if saved.Revision != before.Revision {
+		t.Fatalf("revision = %d, want %d: a default branch sync is not a settings write", saved.Revision, before.Revision)
+	}
+	other, err := s.GetProject(ctx, 43)
+	if err != nil || other.DefaultBranch != "main" {
+		t.Fatalf("another project changed: %+v, %v", other, err)
+	}
+
+	// A caller that observed the old value loses to the earlier writer.
+	applied, err = s.UpdateProjectDefaultBranch(ctx, 42, "main", "release")
+	if err != nil || applied {
+		t.Fatalf("stale previous = %v, %v; want dropped", applied, err)
+	}
+	saved, err = s.GetProject(ctx, 42)
+	if err != nil || saved.DefaultBranch != "develop" {
+		t.Fatalf("stale write changed the row: %+v, %v", saved, err)
+	}
+
+	// Writing the value that is already stored changes nothing.
+	applied, err = s.UpdateProjectDefaultBranch(ctx, 42, "develop", "develop")
+	if err != nil || applied {
+		t.Fatalf("same value = %v, %v; want no change", applied, err)
+	}
+
+	// An unknown project matches no row, like the other compare-and-set writes.
+	applied, err = s.UpdateProjectDefaultBranch(ctx, 999, "main", "develop")
+	if err != nil || applied {
+		t.Fatalf("unknown project = %v, %v; want false, nil", applied, err)
+	}
+}
+
+func TestUpdateProjectDefaultBranchRejectsInvalidInput(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t, newFakeClock())
+	mustProject(t, s, 42)
+
+	for _, next := range []string{"", " ", "\t\n"} {
+		applied, err := s.UpdateProjectDefaultBranch(ctx, 42, "main", next)
+		if err == nil || applied {
+			t.Fatalf("next %q = %v, %v; want an error", next, applied, err)
+		}
+	}
+	for _, id := range []int64{0, -1} {
+		applied, err := s.UpdateProjectDefaultBranch(ctx, id, "main", "develop")
+		if err == nil || applied {
+			t.Fatalf("id %d = %v, %v; want an error", id, applied, err)
+		}
+	}
+	saved, err := s.GetProject(ctx, 42)
+	if err != nil || saved.DefaultBranch != "main" {
+		t.Fatalf("rejected update changed the row: %+v, %v", saved, err)
+	}
+}
+
 func TestDeleteProjectCleansExtensionsAndBindings(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t, newFakeClock())

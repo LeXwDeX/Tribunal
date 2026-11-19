@@ -74,6 +74,9 @@ type ReviewStore interface {
 	dag.EventStore
 	GetProject(ctx context.Context, id int64) (*store.Project, error)
 	ListProjects(ctx context.Context) ([]store.Project, error)
+	// UpdateProjectDefaultBranch follows a default branch change reported by
+	// GitLab; it only writes while the row still holds previous.
+	UpdateProjectDefaultBranch(ctx context.Context, id int64, previous, next string) (bool, error)
 	GetJob(ctx context.Context, id string) (*store.Job, error)
 	GetReviewControl(ctx context.Context, projectID, mrIID int64) (*store.ReviewControl, error)
 	ActivateReviewCandidate(ctx context.Context, activation store.ReviewCandidateActivation) (string, int64, error)
@@ -176,6 +179,9 @@ type ReviewService struct {
 	now               func() time.Time
 	cancelPoll        time.Duration
 	cancelWait        time.Duration
+	// queue schedules the workspace refresh that follows a default branch
+	// change found during a run; nil skips the refresh, not the synchronization.
+	queue JobEnqueuer
 }
 
 // ReviewServiceConfig configures ReviewService.
@@ -217,6 +223,9 @@ type ReviewServiceConfig struct {
 	Now               func() time.Time
 	CancelPoll        time.Duration
 	CancelWait        time.Duration
+	// Queue is optional. It schedules the workspace refresh that follows a
+	// default branch change found during a review run.
+	Queue JobEnqueuer
 }
 
 // NewReviewService validates dependencies and builds the F1/F2 service.
@@ -309,6 +318,7 @@ func NewReviewService(cfg ReviewServiceConfig) (*ReviewService, error) {
 		now:            now,
 		cancelPoll:     poll,
 		cancelWait:     wait,
+		queue:          cfg.Queue,
 	}, nil
 }
 

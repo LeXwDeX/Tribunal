@@ -293,6 +293,36 @@ func (s *Store) UpdateProjectWebhookHealth(ctx context.Context, id int64, observ
 	return n == 1, nil
 }
 
+// UpdateProjectDefaultBranch replaces the stored default branch only while the
+// row still holds previous. The default branch is written at registration and
+// otherwise follows the branch GitLab reports, so two writers can observe the
+// same drift; the loser of the compare-and-set reads the winner's value instead
+// of overwriting it. It reports whether the row changed: an unknown project, a
+// stale previous value and an unchanged value all return false without an
+// error. Like a webhook health write it does not touch the settings revision.
+func (s *Store) UpdateProjectDefaultBranch(ctx context.Context, id int64, previous, next string) (bool, error) {
+	if id <= 0 {
+		return false, errors.New("sqlite: project id is required")
+	}
+	if strings.TrimSpace(next) == "" {
+		return false, errors.New("sqlite: default branch is required")
+	}
+	if previous == next {
+		return false, nil
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE projects SET default_branch = ?, updated_at = ? WHERE id = ? AND default_branch = ?`,
+		next, formatTime(s.now().UTC()), id, previous)
+	if err != nil {
+		return false, fmt.Errorf("sqlite: update project default branch: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("sqlite: update project default branch: %w", err)
+	}
+	return n == 1, nil
+}
+
 // UpdateProjectHook stores the service-created hook ID and its secret.
 func (s *Store) UpdateProjectHook(ctx context.Context, id int64, hookID *int64, secretEnc []byte) error {
 	if id <= 0 {
