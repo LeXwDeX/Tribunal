@@ -256,7 +256,6 @@ td.nowrap {
   border-radius: var(--radius-md);
   background: var(--control-bg);
   color: var(--text);
-  outline: none;
   box-sizing: border-box;
   transition:
     border-color var(--dur-fast) var(--ease),
@@ -282,6 +281,9 @@ td.nowrap {
 .textarea:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-ring);
+  /* Forced-colors mode drops the box-shadow ring but repaints a transparent outline. */
+  outline: 2px solid transparent;
+  outline-offset: 2px;
 }
 
 .input[aria-invalid="true"],

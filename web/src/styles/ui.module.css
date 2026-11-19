@@ -524,7 +524,9 @@
   border-color: var(--accent);
   border-radius: var(--radius-md);
   box-shadow: 0 0 0 3px var(--accent-ring);
-  outline: none;
+  /* Forced-colors mode drops the box-shadow ring but repaints a transparent outline. */
+  outline: 2px solid transparent;
+  outline-offset: 2px;
 }
 
 .selectTrigger[aria-invalid="true"] {
@@ -1749,5 +1751,33 @@
   .tab {
     height: 44px;
     min-width: 44px;
+  }
+  /* Inline buttons and option rows reach the 44px touch target. A 44px button
+     fills the 44px field it sits in, so the typed text is padded clear of it
+     (4px inset + 44px). */
+  .searchClear,
+  .dateButton,
+  .calendarNav {
+    width: var(--control-h);
+    height: var(--control-h);
+  }
+  .calendarAction {
+    min-width: var(--control-h);
+    min-height: var(--control-h);
+  }
+  .selectOption {
+    min-height: var(--control-h);
+  }
+  /* The 44px nav and action buttons grow the calendar past the 360px popover
+     height it is positioned for, so trim the gaps around them to avoid a scroll. */
+  .calendarHeader {
+    margin-bottom: var(--space-2xs);
+  }
+  .calendarFooter {
+    padding-top: var(--space-2xs);
+  }
+  .searchField .searchInput,
+  .dateInputWrap .dateInput {
+    padding-right: var(--space-4xl);
   }
 }
