@@ -208,7 +208,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
           ? '项目已保存，使用平台共享 bot 调用 GitLab；后台会拉取仓库并生成评审上下文，会调用模型并消耗 token，但不会修改仓库代码。'
           : '项目已保存。平台已加密保存访问 Key；后台会拉取仓库并生成评审上下文，会调用模型并消耗 token，但不会修改仓库代码。')
         : (sharedBotCredential
-          ? '只需填写项目地址：保存后由平台校验权限、自动创建 Webhook 并初始化。会调用模型并消耗 token，不会修改仓库代码。'
+          ? '填写仓库地址即可保存；也可以先校验连接。'
           : '先只读校验连接，确认项目和权限；校验通过后才保存并初始化。保存会加密存储访问 Key，自动创建 Webhook，并在后台拉取仓库、生成评审上下文，会调用模型并消耗 token。不会修改仓库代码。')}
       wide
       footer={result ? (
@@ -260,8 +260,8 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
       ) : (
         <>
           <ol className={page.stepper} aria-label="注册步骤">
-            <li className={`${page.step} ${!validation && !usesSharedBot ? page.stepOn : ''}`} aria-current={!validation && !usesSharedBot ? 'step' : undefined}><b>1</b>校验连接</li>
-            <li className={validation || usesSharedBot ? `${page.step} ${page.stepOn}` : page.step} aria-current={validation || usesSharedBot ? 'step' : undefined}><b>2</b>保存并初始化</li>
+            <li className={validation ? page.step : `${page.step} ${page.stepOn}`} aria-current={validation ? undefined : 'step'}><b>1</b>{sharedBotCredential ? '校验连接（可选）' : '校验连接'}</li>
+            <li className={validation ? `${page.step} ${page.stepOn}` : page.step} aria-current={validation ? 'step' : undefined}><b>2</b>保存并初始化</li>
           </ol>
           {validationError ? <ErrorState error={validationError} title="校验失败" /> : null}
           {isAlreadyRegistered(error) ? (
@@ -312,7 +312,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
               </div>
             </>
           ) : null}
-          <div className="formGrid">
+          <div className={sharedBotCredential ? undefined : 'formGrid'}>
             <Field label="仓库地址或项目 ID" htmlFor={projectId} error={errors.project || errors.Project} hint="支持 GitLab 项目完整网址，也兼容 group/project 或项目 ID。">
               <input id={projectId} className="input" value={project} onChange={(event) => changeProject(event.target.value)} placeholder="https://gitlab.example.com/group/project" autoComplete="off" aria-invalid={Boolean(errors.project)} disabled={pending} />
             </Field>
@@ -341,7 +341,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
           </Disclosure>
           <div className={page.registrationNotice}>
             {sharedBotCredential
-              ? '保存并初始化会登记项目、自动创建 GitLab Webhook（平台代建），评审使用平台共享 bot，并入队后台拉取与上下文生成；会调用模型并消耗 token。所有操作都不会修改仓库代码。'
+              ? '保存后评审使用平台共享 bot：自动创建 Webhook，后台拉取仓库并生成上下文，会调用模型并消耗 token，不会修改仓库代码。'
               : '保存并初始化会登记项目、加密保存访问 Key、自动创建 GitLab Webhook，入队后台拉取与上下文生成；会调用模型并消耗 token。所有操作都不会修改仓库代码。'}
           </div>
         </>
