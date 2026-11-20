@@ -19,6 +19,7 @@ describe('shared-credential project settings', () => {
     const select = await screen.findByLabelText('BLOCKING 时写 commit status')
     expect(select).toBeDisabled()
     expect(screen.getByText(/共享模式不支持 commit status/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Key/ })).not.toBeInTheDocument()
   })
 
   it('keeps the commit status override editable for project-token projects', async () => {
@@ -32,5 +33,6 @@ describe('shared-credential project settings', () => {
     const select = await screen.findByLabelText('BLOCKING 时写 commit status')
     expect(select).toBeEnabled()
     expect(screen.queryByText(/共享模式不支持 commit status/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '更新访问 Key' })).toBeInTheDocument()
   })
 })

@@ -266,7 +266,7 @@ describe('project registration', () => {
     await user.click(registerButtons[0])
 
     expect(screen.getAllByText(/使用平台共享 bot/).length).toBeGreaterThan(0)
-    const key = screen.getByLabelText('访问 Key（可选）')
+    expect(screen.queryByLabelText(/访问 Key/)).not.toBeInTheDocument()
     await user.type(screen.getByLabelText('仓库地址或项目 ID'), repositoryUrl)
     const save = screen.getByRole('button', { name: '保存并初始化' })
     const validate = screen.getByRole('button', { name: '校验连接' })
@@ -287,7 +287,6 @@ describe('project registration', () => {
       profile: 'default',
       settings: { skip_draft: true },
     }])
-    expect(key).toHaveValue('')
   })
 })
 

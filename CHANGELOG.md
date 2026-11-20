@@ -15,6 +15,7 @@
 
 ### 变更
 
+- **共享 bot 模式下隐藏项目级访问 Key 入口**（[#631](https://github.com/LeXwDeX/Tribunal/issues/631)）：注册对话框不再显示「访问 Key（可选）」，项目列表不再显示「Key 过期」列，使用共享 bot 的项目设置不再提供「设置项目级 Key」。未启用共享 bot 的部署和已持有项目级 token 的项目不受影响；后端接口不变，功能移除由 [#627](https://github.com/LeXwDeX/Tribunal/issues/627) 跟踪。
 - **项目列表「最近评审」只显示结论与 MR**（[#626](https://github.com/LeXwDeX/Tribunal/issues/626)）：去掉下方的「状态 · 相对时间」一行。
 - **控制台文案精简**（[#626](https://github.com/LeXwDeX/Tribunal/issues/626)）：删减提示、空状态和错误说明中的重复解释，保留权限、不可逆操作、重启等警示。
 

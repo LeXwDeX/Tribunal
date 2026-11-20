@@ -208,7 +208,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
           ? '项目已保存，使用平台共享 bot 调用 GitLab；后台会拉取仓库并生成评审上下文，会调用模型并消耗 token，但不会修改仓库代码。'
           : '项目已保存。平台已加密保存访问 Key；后台会拉取仓库并生成评审上下文，会调用模型并消耗 token，但不会修改仓库代码。')
         : (sharedBotCredential
-          ? '只需填写项目地址：保存后由平台校验权限、自动创建 Webhook 并初始化。选择性地填写项目 Key 可改用项目级凭据。会调用模型并消耗 token，不会修改仓库代码。'
+          ? '只需填写项目地址：保存后由平台校验权限、自动创建 Webhook 并初始化。会调用模型并消耗 token，不会修改仓库代码。'
           : '先只读校验连接，确认项目和权限；校验通过后才保存并初始化。保存会加密存储访问 Key，自动创建 Webhook，并在后台拉取仓库、生成评审上下文，会调用模型并消耗 token。不会修改仓库代码。')}
       wide
       footer={result ? (
@@ -316,16 +316,16 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
             <Field label="仓库地址或项目 ID" htmlFor={projectId} error={errors.project || errors.Project} hint="支持 GitLab 项目完整网址，也兼容 group/project 或项目 ID。">
               <input id={projectId} className="input" value={project} onChange={(event) => changeProject(event.target.value)} placeholder="https://gitlab.example.com/group/project" autoComplete="off" aria-invalid={Boolean(errors.project)} disabled={pending} />
             </Field>
-            <Field
-              label={sharedBotCredential ? '访问 Key（可选）' : '访问 Key'}
-              htmlFor={tokenId}
-              error={errors.token || errors.Token}
-              hint={sharedBotCredential
-                ? '留空即使用平台共享 bot，无需项目 Key；填写项目 Key 可改用项目级凭据。Key 只提交给服务端，不写入浏览器存储。'
-                : '需要 api 和 read_repository scope；只提交给服务端，不写入浏览器存储。'}
-            >
-              <input id={tokenId} className="input" type="password" value={token} onChange={(event) => changeToken(event.target.value)} autoComplete="new-password" aria-invalid={Boolean(errors.token)} disabled={pending} />
-            </Field>
+            {sharedBotCredential ? null : (
+              <Field
+                label="访问 Key"
+                htmlFor={tokenId}
+                error={errors.token || errors.Token}
+                hint="需要 api 和 read_repository scope；只提交给服务端，不写入浏览器存储。"
+              >
+                <input id={tokenId} className="input" type="password" value={token} onChange={(event) => changeToken(event.target.value)} autoComplete="new-password" aria-invalid={Boolean(errors.token)} disabled={pending} />
+              </Field>
+            )}
           </div>
           <Disclosure summary="高级设置：分支与 Draft">
             <div className={ui.stackTop}>
@@ -341,7 +341,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
           </Disclosure>
           <div className={page.registrationNotice}>
             {sharedBotCredential
-              ? '保存并初始化会登记项目、自动创建 GitLab Webhook（平台代建），评审使用平台共享 bot（填写项目 Key 时改用项目级凭据），并入队后台拉取与上下文生成；会调用模型并消耗 token。所有操作都不会修改仓库代码。'
+              ? '保存并初始化会登记项目、自动创建 GitLab Webhook（平台代建），评审使用平台共享 bot，并入队后台拉取与上下文生成；会调用模型并消耗 token。所有操作都不会修改仓库代码。'
               : '保存并初始化会登记项目、加密保存访问 Key、自动创建 GitLab Webhook，入队后台拉取与上下文生成；会调用模型并消耗 token。所有操作都不会修改仓库代码。'}
           </div>
         </>
@@ -352,6 +352,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
 
 export function ProjectsPage() {
   const canRegister = useCanRegisterProject()
+  const sharedBotCredential = useSharedBotCredential()
   const navigate = useNavigate()
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -400,7 +401,7 @@ export function ProjectsPage() {
       <div className={ui.pageStack}>
         <PageHeader
           title="项目"
-          description="每个项目用自己的 Project Access Token；评审结果以该 token 的 bot 用户身份发布。"
+          description={sharedBotCredential ? '评审通过平台共享 bot 调用 GitLab 并发布结果。' : '每个项目用自己的 Project Access Token；评审结果以该 token 的 bot 用户身份发布。'}
           actions={canRegister ? <Button variant="primary" onClick={() => setRegisterOpen(true)}>注册项目</Button> : undefined}
         />
 
@@ -443,7 +444,7 @@ export function ProjectsPage() {
                   <th scope="col">项目</th>
                   <th scope="col">工作区</th>
                   <th scope="col">最近评审</th>
-                  <th scope="col">Key 过期</th>
+                  {sharedBotCredential ? null : <th scope="col">Key 过期</th>}
                   <th scope="col">Webhook</th>
                   <th scope="col">权限</th>
                   <th scope="col">启用</th>
@@ -482,7 +483,7 @@ export function ProjectsPage() {
                           </div>
                         ) : <span className={tableCell.muted}>—</span>}
                       </td>
-                      <td><span className={classNames(page.expiry, EXPIRY_TONES[expiry.tone])}>{expiry.label}</span></td>
+                      {sharedBotCredential ? null : <td><span className={classNames(page.expiry, EXPIRY_TONES[expiry.tone])}>{expiry.label}</span></td>}
                       <td className={classNames(page.fit, tableCell.nowrap)}>
                         <Badge tone={webhookTone(webhookState)}>{labelForWebhookState(webhookState)}</Badge>
                         {project.hook_id ? <span className={styles.tableMeta}> · #{project.hook_id}</span> : null}
