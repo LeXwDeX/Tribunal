@@ -186,8 +186,8 @@ describe('review publication state', () => {
     const panel = publicationPanel()
     expect(within(panel).getByText('跳过原因')).toBeInTheDocument()
     expect(within(panel).getAllByText(/stale: merge request head changed/).length).toBeGreaterThan(0)
-    expect(within(panel).getByText(/过期结果/)).toBeInTheDocument()
-    expect(within(panel).getByText(/不会自动修复/)).toBeInTheDocument()
+    expect(within(panel).getByText(/结果已过期/)).toBeInTheDocument()
+    expect(within(panel).getByText(/不会自动重发或修复/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '重新发布' })).not.toBeInTheDocument()
   })
 

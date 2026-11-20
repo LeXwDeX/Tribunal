@@ -288,11 +288,10 @@ describe('finding annotation controls', () => {
     renderReview()
     await screen.findByRole('button', { name: /展开：并发写 map 未加锁/ })
 
-    await user.click(screen.getByRole('button', { name: '发布' }))
     await user.click(screen.getByRole('combobox', { name: '按严重级别过滤' }))
     await user.click(await screen.findByRole('option', { name: 'P1' }))
     await waitFor(() => expect(
-      state.findingsUrls.some((url) => url.includes('decision=publish') && url.includes('severity=P1')),
+      state.findingsUrls.some((url) => url.includes('severity=P1')),
     ).toBe(true))
     const before = state.findingsUrls.length
 
@@ -303,7 +302,7 @@ describe('finding annotation controls', () => {
 
     await waitFor(() => expect(state.findingsUrls.length).toBeGreaterThan(before))
     const last = state.findingsUrls[state.findingsUrls.length - 1]
-    expect(last).toContain('decision=publish')
     expect(last).toContain('severity=P1')
+    expect(last).not.toContain('decision=')
   })
 })

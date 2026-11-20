@@ -210,7 +210,7 @@ function MetricStrip({ stats, loading, error, onRetry }: { stats?: Stats; loadin
     return (
       <Panel>
         <ErrorState error={error} onRetry={onRetry} title="统计数据加载失败" />
-        <span className={styles.notice}>统计不可用时不会用示例数据代替。</span>
+        <span className={styles.notice}>统计不可用时不显示示例数据。</span>
       </Panel>
     )
   }
@@ -411,8 +411,8 @@ export function OverviewPage() {
         {projectsPage.isSuccess && !canTrigger ? (
           <p className={styles.notice}>
             {providersEnabled
-              ? '还没有登记项目；可以注册第一个项目。'
-              : '当前账号没有可管理的项目；可以注册自己的项目，或等待管理员分配。只显示可读数据。'}
+              ? '还没有登记项目，可注册第一个。'
+              : '当前账号没有可管理的项目，可注册自己的项目或等待管理员分配。只显示可读数据。'}
             后端会独立校验权限。
           </p>
         ) : null}

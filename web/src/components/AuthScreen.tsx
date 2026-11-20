@@ -28,7 +28,7 @@ export function AuthScreen({
           <span className={styles.brandName}>Tribunal</span>
         </div>
         <div className={styles.artBody}>
-          <p className={styles.tagline}>每一条评审意见，都经过提出、挑战与裁决。</p>
+          <p className={styles.tagline}>每条评审意见都经过提出、挑战与裁决。</p>
           <ol className={styles.authFlow}>
             <li><b>01</b>独立 reviewer 提出问题</li>
             <li><b>02</b>challenger 尝试推翻</li>

@@ -92,7 +92,7 @@ export function App() {
     const notice = sessionEnded === 'logout'
       ? '已退出登录。'
       : sessionEnded === 'evicted' || sessionEvicted
-        ? '当前会话已在其他登录中被替换（每个账号最多保留 10 个会话），请重新登录。'
+        ? '当前会话已被其他登录替换（每个账号最多保留 10 个会话），请重新登录。'
         : sessionEnded === 'expired' || sessionExpired
           ? '会话已过期，请重新登录。'
           : undefined

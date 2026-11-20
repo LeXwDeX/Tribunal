@@ -132,7 +132,7 @@ describe('statistics provider quality', () => {
 
     const panel = await qualityPanel()
     expect(panel.getByText('没有人工质量样本')).toBeInTheDocument()
-    expect(panel.getByText(/不是不可用/)).toBeInTheDocument()
+    expect(panel.getByText(/筛选范围内没有可归因的提出或反驳记录/)).toBeInTheDocument()
     expect(panel.queryByText('人工质量指标不可用')).not.toBeInTheDocument()
     expect(panel.queryByRole('table')).not.toBeInTheDocument()
   })

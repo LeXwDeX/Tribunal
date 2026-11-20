@@ -220,7 +220,7 @@ export function WebhookPanel({ project }: { project: Project }) {
         onClose={closeDialog}
         onConfirm={() => { void run('rebuild') }}
         title="重建 GitLab webhook？"
-        description="服务端会轮换 webhook secret，并优先更新本服务记录的 hook；记录不存在时才重新创建。手动或外部 hook 不受影响。"
+        description="轮换 webhook secret，优先更新本服务记录的 hook，记录不存在时才重新创建。手动或外部 hook 不受影响。"
         confirmLabel="重建 webhook"
         danger={false}
         pending={pending === 'rebuild'}

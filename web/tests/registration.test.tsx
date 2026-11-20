@@ -308,8 +308,8 @@ describe('already registered conflict (#277)', () => {
     await screen.findByText('校验通过，尚未保存')
     await user.click(screen.getByRole('button', { name: '保存并初始化' }))
 
-    expect(await screen.findByText(/该项目已注册。若项目列表中看不到它/)).toBeInTheDocument()
-    expect(screen.getByText(/请联系管理员把该项目分配给你/)).toBeInTheDocument()
+    expect(await screen.findByText(/该项目已注册。若列表中看不到它/)).toBeInTheDocument()
+    expect(screen.getByText(/请联系管理员分配给你/)).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: '前往系统页授权' })).not.toBeInTheDocument()
     expect(screen.queryByText('保存并初始化失败')).not.toBeInTheDocument()
     expect(screen.queryByText(/ask a platform administrator/)).not.toBeInTheDocument()
@@ -330,7 +330,7 @@ describe('already registered conflict (#277)', () => {
     await user.click(screen.getByRole('button', { name: '保存并初始化' }))
 
     expect(await screen.findByText('保存并初始化失败')).toBeInTheDocument()
-    expect(screen.queryByText(/请联系管理员把该项目分配给你/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/请联系管理员分配给你/)).not.toBeInTheDocument()
   })
 })
 

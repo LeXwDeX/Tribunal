@@ -1169,7 +1169,7 @@ function ModelDrawer({
 
   const runToolTest = async () => {
     if (!model) {
-      setToolTestError('请先保存模型，再进行工具调用测试。')
+      setToolTestError('请先保存模型，再测试工具调用。')
       return
     }
     setPending(true)
@@ -1755,7 +1755,7 @@ function ConfigModelDrawer({
 
   const runConnectivityTest = async () => {
     if (!model) {
-      setProbe({ ok: false, text: '请先保存模型，再进行连通性测试。' })
+      setProbe({ ok: false, text: '请先保存模型，再测试连通性。' })
       return
     }
     setPending(true)
@@ -1775,7 +1775,7 @@ function ConfigModelDrawer({
 
   const runToolProbe = async () => {
     if (!model) {
-      setProbe({ ok: false, text: '请先保存模型，再进行工具调用测试。' })
+      setProbe({ ok: false, text: '请先保存模型，再测试工具调用。' })
       return
     }
     setPending(true)
@@ -1936,7 +1936,7 @@ function ConfigModelDrawer({
 
           <Note tone="neutral">
             配置模型通过 overlay 编辑，不写数据库；字段值来自“内置默认 &lt; base YAML &lt; overlay”，节点级参数由 0028 覆盖。
-            <code>user:</code> 模型的全局默认（0029）不作用于配置模型。保存后显示“待重启”，重启可能取消在途评审。
+            <code>user:</code> 模型的全局默认（0029）不作用于配置模型。保存后显示“待重启”。
           </Note>
 
           {status ? <span className={styles.resultOk} role="status">{status}</span> : null}

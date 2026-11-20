@@ -27,7 +27,7 @@ export function ExecutionGraph({
   }, [layout])
 
   if (!nodes.length) {
-    return <EmptyState title="执行图尚未生成" description="评审开始执行后，节点会按依赖关系显示在这里。" />
+    return <EmptyState title="执行图尚未生成" description="评审开始执行后，节点按依赖关系显示在这里。" />
   }
 
   return (

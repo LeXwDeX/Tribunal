@@ -98,6 +98,7 @@ describe('projects list v2 layout', () => {
     const row = (await screen.findByRole('link', { name: 'group/backend' })).closest('tr') as HTMLElement
     expect(within(row).queryByText('strict')).not.toBeInTheDocument()
     expect(within(row).getByText('BLOCKING')).toBeInTheDocument()
+    expect(within(row).queryByText(/已完成/)).not.toBeInTheDocument()
     expect(within(row).getByRole('link', { name: /!318/ })).toBeInTheDocument()
     expect(within(row).getByText(/10 天后到期/)).toBeInTheDocument()
     expect(within(row).getByText('可管理')).toBeInTheDocument()

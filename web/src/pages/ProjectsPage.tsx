@@ -7,7 +7,7 @@ import type { Project, ProjectRegistration, ProjectValidation } from '../api/typ
 import { useCanRegisterProject, useSharedBotCredential } from '../components/RoleContext'
 import {
   Badge, Button, Checkbox, DataTable, Dialog, Disclosure, EmptyState, ErrorState, ExternalLink, Field, LoadingState, PageHeader,
-  Pagination, Panel, PanelBody, RelativeTime, SearchField, Segmented, StatusBadge, Switch, Toolbar, VerdictBadge, classNames,
+  Pagination, Panel, PanelBody, SearchField, Segmented, StatusBadge, Switch, Toolbar, VerdictBadge, classNames,
   tableCell, useToast,
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
@@ -267,7 +267,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
           {isAlreadyRegistered(error) ? (
             <div className={ui.errorBox} role="alert">
               <strong>项目已注册</strong>
-              <span>该项目已注册。若项目列表中看不到它，说明你还没有访问权限；请联系管理员把该项目分配给你。</span>
+              <span>该项目已注册。若列表中看不到它，说明你还没有访问权限，请联系管理员分配给你。</span>
             </div>
           ) : error ? <ErrorState error={error} title="保存并初始化失败" /> : null}
           {validation ? (
@@ -478,10 +478,6 @@ export function ProjectsPage() {
                             <span className={page.reviewCell}>
                               {lastReview.verdict ? <VerdictBadge verdict={lastReview.verdict} /> : <StatusBadge status={lastReview.status} />}
                               <Link to={`/reviews/${encodeURIComponent(lastReview.id)}`}>!{lastReview.mr_iid} {lastReview.mr_title || ''}</Link>
-                            </span>
-                            <span className={styles.tableMeta}>
-                              {labelForStatus(lastReview.status)}
-                              {lastReview.created_at ? <> · <RelativeTime value={lastReview.created_at} /></> : null}
                             </span>
                           </div>
                         ) : <span className={tableCell.muted}>—</span>}

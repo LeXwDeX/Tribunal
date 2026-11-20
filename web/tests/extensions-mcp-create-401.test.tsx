@@ -298,7 +298,7 @@ describe('add MCP server dialog', () => {
     await user.type(within(dialog).getByRole('textbox', { name: '名称' }), 'team-search')
     await user.type(within(dialog).getByRole('textbox', { name: '启动命令' }), 'npx')
     await user.click(within(dialog).getByRole('button', { name: '保存' }))
-    expect(await within(dialog).findByText(/请求结果可能不确定/)).toBeInTheDocument()
+    expect(await within(dialog).findByText(/结果可能不确定/)).toBeInTheDocument()
   })
 
   it('maps draft test validation details onto the config field', async () => {

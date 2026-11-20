@@ -2,6 +2,21 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 升级前必读
+
+- 仅涉及控制台前端：无数据库迁移，无配置变更。
+
+### 修复
+
+- **评审详情页对齐**（[#626](https://github.com/LeXwDeX/Tribunal/issues/626)）：「评审范围」「评审告警」「评审材料降级」列表去掉左缩进，与「生成文件」段落对齐；Findings 表的「提出 → 挑战 → 裁决」证据链不再换行。
+
+### 变更
+
+- **项目列表「最近评审」只显示结论与 MR**（[#626](https://github.com/LeXwDeX/Tribunal/issues/626)）：去掉下方的「状态 · 相对时间」一行。
+- **控制台文案精简**（[#626](https://github.com/LeXwDeX/Tribunal/issues/626)）：删减提示、空状态和错误说明中的重复解释，保留权限、不可逆操作、重启等警示。
+
 ## [1.9.2] - 2026-11-20
 
 ### 升级前必读

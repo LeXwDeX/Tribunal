@@ -423,13 +423,13 @@ describe('profile node sources, params and same-model hint (#339)', () => {
       : undefined))
     const user = await openEditor()
     await user.click(screen.getByRole('button', { name: '保存' }))
-    expect(await screen.findByText(/请刷新并重新加载/)).toBeInTheDocument()
+    expect(await screen.findByText(/请重新加载/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '保存' })).toBeDisabled()
     const reads = () => fetchMock.mock.calls.filter(([url, init]) => String(url) === '/api/v1/profiles/default' && (!init?.method || init.method === 'GET')).length
     const before = reads()
     await user.click(screen.getByRole('button', { name: '刷新并重新加载' }))
     await waitFor(() => expect(reads()).toBeGreaterThan(before))
-    await waitFor(() => expect(screen.queryByText(/请刷新并重新加载/)).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.queryByText(/请重新加载/)).not.toBeInTheDocument())
   })
 
   it('cancelling the restore confirmation sends nothing', async () => {
@@ -506,7 +506,7 @@ describe('profile node sources, params and same-model hint (#339)', () => {
         : undefined))
       const user = await openEditor()
       await user.click(screen.getByRole('button', { name: '保存' }))
-      const alert = await screen.findByText(/请刷新并重新加载/)
+      const alert = await screen.findByText(/请重新加载/)
       const lastGroup = screen.getByRole('group', { name: 'challenge' })
       expect(lastGroup.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
       const reload = screen.getByRole('button', { name: '刷新并重新加载' })
@@ -544,7 +544,7 @@ describe('profile node sources, params and same-model hint (#339)', () => {
     const user = await openEditor()
     await user.type(screen.getByLabelText('review max_tokens'), '123')
     await user.click(screen.getByRole('button', { name: '保存' }))
-    await screen.findByText(/请刷新并重新加载/)
+    await screen.findByText(/请重新加载/)
     failReads = true
     await user.click(screen.getByRole('button', { name: '刷新并重新加载' }))
     expect(await screen.findByText('重新加载失败，请稍后重试。')).toBeInTheDocument()
@@ -552,7 +552,7 @@ describe('profile node sources, params and same-model hint (#339)', () => {
     failReads = false
     revision = 4
     await user.click(screen.getByRole('button', { name: '刷新并重新加载' }))
-    await waitFor(() => expect(screen.queryByText(/请刷新并重新加载/)).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.queryByText(/请重新加载/)).not.toBeInTheDocument())
     expect(screen.getByLabelText('challenge max_tokens')).toHaveValue(777)
     expect(screen.getByLabelText('review max_tokens')).toHaveValue(null)
     expect(screen.getByLabelText('全局默认 max_tokens')).toHaveValue(null)

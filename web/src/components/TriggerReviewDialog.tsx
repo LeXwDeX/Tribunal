@@ -68,7 +68,7 @@ export function TriggerReviewDialog({
       open={open}
       onClose={onClose}
       title="手动触发评审"
-      description="提交后服务端创建评审任务。这里只显示任务 ID；评审记录出现在列表中后即可查看执行图。"
+      description="提交后创建评审任务，这里只显示任务 ID。评审记录出现在列表后即可查看执行图。"
       footer={(
         <>
           <Button variant="secondary" onClick={onClose} disabled={pending}>取消</Button>
@@ -77,7 +77,7 @@ export function TriggerReviewDialog({
       )}
     >
       {error ? <ErrorState error={error} title="触发失败" /> : null}
-      {projects.length === 0 && !presetProjectId ? <div className="muted">尚无已注册项目，请先注册项目。</div> : null}
+      {projects.length === 0 && !presetProjectId ? <div className="muted">尚无已注册项目，请先注册。</div> : null}
       <div className="formGrid">
         <Field label="项目" htmlFor={projectId} error={fieldErrors.project}>
           <Select

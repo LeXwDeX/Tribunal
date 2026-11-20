@@ -173,7 +173,7 @@ export function NodeDrawer({
             callsPurged
               ? <span className="muted small">该节点的模型调用明细已按保留策略删除{retentionHours ? `（保留 ${retentionHours} 小时）` : ''}，用量汇总仍保留。修改 <code>storage.llm_call_retention</code> 可延长保留期。</span>
               : current?.token_free
-                ? <span className="muted small">这是一段代码节点，没有模型调用。</span>
+                ? <span className="muted small">代码节点，没有模型调用。</span>
                 : <span className="muted small">没有模型调用记录；服务端未记录该节点为代码节点。</span>
           ) : null}
           {calls.items.length ? (
