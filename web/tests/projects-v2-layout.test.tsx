@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { Route, Routes, useLocation } from 'react-router-dom'
 import { ProjectsPage } from '../src/pages/ProjectsPage'
 import { project } from './fixtures'
-import { installFetch, jsonResponse, renderWithProviders } from './test-utils'
+import { adminMe, installFetch, jsonResponse, renderWithProviders } from './test-utils'
 
 function LocationProbe() {
   const location = useLocation()
@@ -106,6 +106,16 @@ describe('projects list v2 layout', () => {
     expect(within(readonly).getByText('只读')).toBeInTheDocument()
     const admin = screen.getByRole('link', { name: 'group/admin' }).closest('tr') as HTMLElement
     expect(within(admin).getByText('管理员')).toBeInTheDocument()
+  })
+
+  it('hides the key expiry column when the shared bot credential is enabled', async () => {
+    installFetch((url) => url.startsWith('/api/v1/projects') ? jsonResponse({ projects: [project({ shared_credential: true })] }) : jsonResponse({}))
+    renderWithProviders(<ProjectsPage />, { route: '/projects', me: { ...adminMe, shared_bot_credential: true } })
+
+    const table = await screen.findByRole('table', { name: '项目列表' })
+    expect(within(table).getAllByRole('columnheader').map((header) => header.textContent))
+      .toEqual(['项目', '工作区', '最近评审', 'Webhook', '权限', '启用'])
+    expect(screen.queryByText(/Project Access Token/)).not.toBeInTheDocument()
   })
 
   it('renders the list through the shared table with Chinese headers in a fixed order', async () => {
