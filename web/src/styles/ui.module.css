@@ -1838,6 +1838,18 @@
   overflow-wrap: anywhere;
 }
 
+/* Outer edge cells line up with the panel header, toolbar and table note,
+   which all use --space-lg; inner columns keep the tighter --space-md. */
+.table th:first-child,
+.table td:first-child {
+  padding-left: var(--space-lg);
+}
+
+.table th:last-child,
+.table td:last-child {
+  padding-right: var(--space-lg);
+}
+
 /* Cells allow breaking anywhere for long text, which also lets an auto-sized
    column shrink below a short token. Badges keep their full width so a level
    or status never wraps character by character or gets clipped. */
