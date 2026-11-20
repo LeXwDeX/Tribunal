@@ -78,6 +78,8 @@ go test -race -count=1 -run '^TestName$' ./internal/app/
 cd web && npm test -- tests/auth.test.tsx -t 'test name' && cd ..
 ```
 
+A filter that matches nothing still exits 0 (`[no tests to run]` in Go, every test skipped in vitest), so confirm the output shows the intended test ran.
+
 ## 4. Open-source contribution rules
 
 - **License and provenance.** The project is licensed under the Apache License, Version 2.0. By contributing, you agree to license your contribution under the same terms. Keep copyright notices and `LICENSE` intact. Do not copy code, assets or prompts from another project unless the license is compatible and the provenance is recorded. Bundled executables and third-party assets need a version and license record under `third_party/` and a regenerated license bundle.
