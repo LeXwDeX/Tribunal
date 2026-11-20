@@ -481,7 +481,8 @@
 /* The findings table renders through DataTable, which owns the table, row and
    cell styles; the classes below only style the content of a cell. */
 .sevCell {
-  width: 56px;
+  width: 1%;
+  white-space: nowrap;
 }
 
 .sevOriginal {

@@ -240,6 +240,7 @@
   font-size: var(--fs-meta);
   font-weight: var(--fw-medium);
   line-height: 1;
+  white-space: nowrap;
 }
 
 .sev::before {
@@ -1835,6 +1836,15 @@
   vertical-align: middle;
   border-bottom: 1px solid var(--border);
   overflow-wrap: anywhere;
+}
+
+/* Cells allow breaking anywhere for long text, which also lets an auto-sized
+   column shrink below a short token. Badges keep their full width so a level
+   or status never wraps character by character or gets clipped. */
+.table td .badge,
+.table td .sev {
+  flex: none;
+  max-width: none;
 }
 
 .table tbody tr:last-child td {
