@@ -23,12 +23,12 @@ function ErrorFallback({ scope }: { scope: 'page' | 'app' }) {
         <PageHeader
           title={app ? '控制台遇到错误' : '页面遇到错误'}
           description={app
-            ? '这个页面在渲染时发生异常。重新加载后可以继续使用控制台。'
-            : '这个页面在渲染时发生异常，导航和其他页面仍然可用。'}
+            ? '页面渲染出错，重新加载后可继续使用控制台。'
+            : '页面渲染出错，导航和其他页面仍可使用。'}
         />
-        <Panel title="页面无法显示" note="错误详情不会显示在这里，以免暴露堆栈或内部路径。">
+        <Panel title="页面无法显示" note="不显示错误详情，避免暴露堆栈或内部路径。">
           <div className={styles.body} role="alert">
-            <p className={styles.message}>你可以重新加载当前页面，或返回总览继续使用其他功能。</p>
+            <p className={styles.message}>重新加载当前页面，或返回总览。</p>
             <div className={styles.actions}>
               <ButtonLink to="/" variant="primary">返回总览</ButtonLink>
               <Button variant="secondary" onClick={() => window.location.reload()}>重新加载</Button>

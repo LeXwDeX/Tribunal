@@ -225,7 +225,7 @@ function TokenCreateDialog({ open, onClose }: { open: boolean; onClose: () => vo
       onClose={close}
       title={created ? '复制新 API token' : '创建 API token'}
       description={created
-        ? '明文 token 只显示这一次。关闭对话框后将从界面状态中清除。'
+        ? '明文 token 只显示一次，关闭对话框后即清除。'
         : 'API token 供 tribunalctl 或脚本访问项目级 API。设置名称和有效期。'}
       footer={created ? (
         <Button variant="primary" onClick={close}>我已复制，关闭</Button>
@@ -355,7 +355,7 @@ function TokenRenewDialog({ token, open, onClose }: {
       closeDisabled={pending}
       title={renewed ? '复制新 API token' : '续期 API token'}
       description={renewed
-        ? '明文 token 只显示这一次。关闭对话框后将从界面状态中清除。'
+        ? '明文 token 只显示一次，关闭对话框后即清除。'
         : `续期 ${tokenLabel(token)} 会立即签发同名新明文并让旧明文失效。`}
       footer={renewed ? (
         <Button variant="primary" onClick={onClose}>我已复制，关闭</Button>
@@ -578,7 +578,7 @@ function UserDrawer({ user, open, currentUserId, onClose }: {
               error={grants.isError ? grants.error : undefined}
               onRetry={grants.retry}
               errorTitle="授权列表加载失败"
-              empty={<EmptyState title="没有项目授权" description="输入项目 ID 并选择角色即可添加 read 或 manage 授权。" />}
+              empty={<EmptyState title="没有项目授权" description="输入项目 ID 并选择角色，添加 read 或 manage 授权。" />}
             >
               <thead>
                 <tr>
@@ -813,7 +813,7 @@ function AdminUsersPanel() {
         onConfirm={() => { void toggleDisabled() }}
         title={`${disableTarget?.disabled ? '启用账号' : '停用账号'}？`}
         description={disableTarget
-          ? `${disableTarget.disabled ? '启用' : '停用'} ${userLabel(disableTarget)}。${disableTarget.disabled ? '账号恢复后可以重新登录并使用 API token。' : '停用后现有会话与 token 立即失效，且不能重新登录。'}`
+          ? `${disableTarget.disabled ? '启用' : '停用'} ${userLabel(disableTarget)}。${disableTarget.disabled ? '账号恢复后可重新登录并使用 API token。' : '停用后现有会话与 token 立即失效，且不能重新登录。'}`
           : ''}
         confirmLabel={disableTarget?.disabled ? '启用' : '停用'}
         danger={!disableTarget?.disabled}
@@ -909,7 +909,7 @@ function AdminGrantsPanel() {
         flush
         title="项目授权"
         aside={selectedProject ? selectedProject.path_with_namespace : '未选择项目'}
-        note="平台管理员对全部已登记项目隐式拥有 manage，无需在这里授权；此处用于给普通用户分配 read 或 manage（manage 可删除项目）。项目列表来自管理面，不需要管理员自身拥有 grant。"
+        note="平台管理员对全部已登记项目隐式拥有 manage，无需在此授权；此处给普通用户分配 read 或 manage（manage 可删除项目）。项目列表来自管理面，不要求管理员自身拥有 grant。"
       >
         <PanelBody className={insights.grantForm}>
           <div className={insights.grantPicker}>
@@ -966,7 +966,7 @@ function AdminGrantsPanel() {
                 <Button variant="primary" onClick={() => { void grant() }} loading={saving}>授予权限</Button>
               </div>
             </>
-          ) : <EmptyState title="请选择项目" description="选择项目后可以查看并维护该项目的用户授权。" />}
+          ) : <EmptyState title="请选择项目" description="选择项目后可查看并维护该项目的用户授权。" />}
         </PanelBody>
 
         {projectId ? (
@@ -1107,8 +1107,8 @@ export function SystemPage() {
               note={(
                 <>
                   {canSelfService ? '登录用户可管理自己的 token；写操作由 CSRF 保护。' : '当前会话不能创建或撤销 token。'}
-                  用户 API token 由登录用户在控制台创建，供 tribunalctl 或脚本访问项目级 API，明文只在创建时显示一次。
-                  到期前 14 天会在此提示；续期会立即签发同名新明文，旧明文随即失效。
+                  用户 API token 在控制台创建，供 tribunalctl 或脚本访问项目级 API，明文只在创建时显示一次。
+                  到期前 14 天在此提示；续期会立即签发同名新明文，旧明文随即失效。
                   <br />
                   <code>REVIEW_ADMIN_TOKEN</code> 是部署方在环境变量配置的平台管理面 bootstrap Bearer，无用户 ID 与项目 grant，不能读取项目业务数据，也不能在控制台创建或轮换；修改它需改环境变量并重启。
                 </>
@@ -1118,7 +1118,7 @@ export function SystemPage() {
                 <PanelBody>
                   {tokens.isPending ? <LoadingState /> : null}
                   {tokens.isError ? <ErrorState error={tokens.error} onRetry={tokens.retry} /> : null}
-                  {tokens.isSuccess && tokens.items.length === 0 ? <EmptyState title="还没有 API token" description={canSelfService ? '创建一个 token 供 tribunalctl 或脚本使用。' : '当前账号没有 API token。'} /> : null}
+                  {tokens.isSuccess && tokens.items.length === 0 ? <EmptyState title="还没有 API token" description={canSelfService ? '创建一个 token 供 tribunalctl 或脚本使用。' : undefined} /> : null}
                 </PanelBody>
               ) : null}
               {tokens.items.length ? (
@@ -1175,7 +1175,7 @@ export function SystemPage() {
               <Panel
                 title="平台配置"
                 aside="服务端脱敏只读视图"
-                note="此页面不提供编辑；密钥和凭据由服务端脱敏，界面不显示其值。"
+                note="此页面只读；密钥和凭据由服务端脱敏，不显示其值。"
               >
                 {settings.isPending ? <LoadingState label="正在读取平台配置…" /> : null}
                 {settings.isError ? <ErrorState error={settings.error} onRetry={() => { void settings.refetch() }} /> : null}
@@ -1183,7 +1183,7 @@ export function SystemPage() {
                   <>
                     {Object.keys(settings.data || {}).length ? (
                       <pre className={`pre ${ui.jsonBlock} ${ui.jsonBlockTall}`}>{JSON.stringify(settings.data, null, 2)}</pre>
-                    ) : <EmptyState title="平台配置为空" description="服务端返回了空对象；这不代表配置缺失或加载成功。" />}
+                    ) : <EmptyState title="平台配置为空" description="服务端返回了空对象，无法据此判断配置是否缺失。" />}
                   </>
                 ) : null}
               </Panel>

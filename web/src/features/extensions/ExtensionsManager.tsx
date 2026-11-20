@@ -121,7 +121,7 @@ function mappedMcpFieldErrors(fields: Record<string, string>): { name: string; c
 function uncertainWriteError(error: unknown): unknown {
   const uncertain = !(error instanceof ApiError) || error.status === 0 || error.status === 408 || error.status >= 500
   if (!uncertain) return error
-  return new Error(`${errorMessage(error)} 请求结果可能不确定，请先刷新列表确认后再重试。`)
+  return new Error(`${errorMessage(error)} 结果可能不确定，请先刷新列表确认后再重试。`)
 }
 
 function formatFileSize(bytes: number): string {
@@ -471,7 +471,7 @@ function ScopedExtensionsManager({
       <div role="tabpanel" id={`tabpanel-${shownTab}`} aria-labelledby={`extension-tab-${shownTab}`} className={ui.pageStack}>
       {notice}
       {!projectEnabled ? (
-        placeholder ?? <EmptyState title="请选择项目" description="项目级扩展需要指定项目后才能读取。" />
+        placeholder ?? <EmptyState title="请选择项目" description="项目级扩展需先选择项目。" />
       ) : null}
 
       {projectEnabled && shownTab === 'mcp' ? (
@@ -584,7 +584,7 @@ function ScopedExtensionsManager({
         onClose={() => setDeleteServer(null)}
         onConfirm={() => { void removeServer() }}
         title="删除 MCP 服务器？"
-        description={`将删除 ${deleteServer?.name || '该服务器'}。现有块绑定可能仍引用其工具，需要随后调整。`}
+        description={`将删除 ${deleteServer?.name || '该服务器'}。现有块绑定可能仍引用其工具，需随后调整。`}
         confirmLabel="删除"
         pending={deletePending}
         error={deleteError}
@@ -1953,7 +1953,7 @@ function useDialogRequest(scope: string, projectId: number | undefined, action: 
   const reportFailure = (error: unknown, setError: (value: unknown) => void) => {
     const uncertain = !(error instanceof ApiError) || error.status === 0 || error.status === 408 || error.status >= 500
     const safeError = error instanceof ApiError && error.status === 403
-      ? new ApiError(403, 'forbidden', '当前账号没有执行此操作的权限。')
+      ? new ApiError(403, 'forbidden', '当前账号无权执行此操作。')
       : new Error(uncertain
         ? `${error instanceof ApiError && error.status === 0 ? '无法连接服务器。' : '请求未能确认。'}结果可能不确定，请先检查状态再重试。`
         : '请检查输入后重试。')
@@ -2068,7 +2068,7 @@ function EditMcpDialog({ server, onClose, onSaved }: { server: McpServer | null;
             <Textarea id="mcp-replace-config" code rows={9} value={configText} onChange={(event) => setConfigText(event.target.value)} spellCheck={false} disabled={pending} />
           </Field>
           <div className={styles.warning}>
-            替换会覆盖已有配置。脱敏的 env/header 值不会保留；如配置需要密钥，请重新填写完整值，且不要粘贴脱敏占位符。
+            替换会覆盖已有配置。脱敏的 env/header 值不会保留；配置需要密钥时请重新填写完整值，不要粘贴脱敏占位符。
           </div>
         </>
       ) : null}

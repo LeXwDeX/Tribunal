@@ -344,7 +344,7 @@ function QualityPanel({ value }: { value: unknown }) {
       note="准确率 = 人工标注有效 / 已复核（有效+无效）；推翻率 = 提出方被挑战推翻 / 提出问题；误杀率 = 反驳后人工判有效 / 复核反驳。未标注、未确定不计入准确率与误杀率分母，但仍计入提出数、反驳数和推翻率。缺少 provider 归因的角色不计入。零分母显示“无样本”，不显示 0%。人工标注不改变发布结果或评审结论，也不同于下方 GitLab 反馈信号。"
     >
       {state.rows.length === 0 ? (
-        <EmptyState title="没有人工质量样本" description="筛选范围内没有可归因的提出或反驳记录；这是空结果，不是不可用。" />
+        <EmptyState title="没有人工质量样本" description="筛选范围内没有可归因的提出或反驳记录。" />
       ) : (
         <>
           <h3 className={insights.subTitle}>提出方</h3>
@@ -646,7 +646,7 @@ function ProviderAttribution({ providers }: { providers: ProviderFeedbackCounts[
       </DataTable>
       <TablePager page={paged.page} pageCount={paged.pageCount} total={paged.total} onChange={paged.setPage} />
       <TableNote>
-        计数是反馈归因，不代表正确率或误杀率。同一信号可同时计入提出方和挑战方，两个角色计数不能相加当作反馈总数。summary、未关联或关联不一致的不计入。
+        计数是反馈归因，不是正确率或误杀率。同一信号可同时计入提出方和挑战方，两个角色的计数不能相加为反馈总数。summary、未关联或关联不一致的不计入。
       </TableNote>
     </>
   )
@@ -671,7 +671,7 @@ function FeedbackPanel({ value }: { value: unknown }) {
     <Panel
       title="反馈信号"
       aside="来自 stats.feedback"
-      note="按 GitLab 信号展示原始计数；这是原始反馈，不代表模型准确率，也不是人工标注的误杀率。人工评估见上方“人工质量指标”。"
+      note="按 GitLab 信号展示原始计数，不是模型准确率，也不是人工标注的误杀率。人工评估见上方“人工质量指标”。"
     >
       <div className={styles.statGrid}>
         <Metric label="反馈总数" value={feedback.total} note="按反馈时间与项目筛选计数" />
@@ -685,7 +685,7 @@ function FeedbackPanel({ value }: { value: unknown }) {
           ))}
         </div>
       ) : feedback.total === 0 ? (
-        <EmptyState title="没有反馈信号" description="筛选范围内的反馈总数为 0；这是空结果，不是不可用。" />
+        <EmptyState title="没有反馈信号" description="筛选范围内的反馈总数为 0。" />
       ) : (
         <span className="small muted">stats.feedback 没有返回按信号的明细。</span>
       )}
@@ -801,7 +801,7 @@ function OverallTrend({ trend }: { trend: Trend }) {
     return <EmptyState title="每日趋势数据格式无效" description="stats.trend 含负数、非数字或无效日期；为避免显示错误合计，不展示任何趋势行。" />
   }
   if (trend.kind === 'empty') {
-    return <EmptyState title="没有每日趋势" description="trend 为空表示筛选范围内没有执行；这是空结果，不是不可用。缺失日期不补零。" />
+    return <EmptyState title="没有每日趋势" description="trend 为空表示筛选范围内没有执行。缺失日期不补零。" />
   }
   return (
     <>
@@ -906,7 +906,7 @@ function ProjectStatsPanel({ value }: { value: unknown }) {
   if (!state.rows.length) {
     return (
       <Panel title="项目统计" aside="来自 stats.by_project">
-        <EmptyState title="没有项目统计" description="筛选范围内没有项目工作流；这是空结果，不是不可用。" />
+        <EmptyState title="没有项目统计" description="筛选范围内没有项目工作流。" />
       </Panel>
     )
   }
@@ -1005,7 +1005,7 @@ function GroupStatsPanel({ value, dimension }: { value: unknown; dimension: 'pro
   if (!state.rows.length) {
     return (
       <Panel title={title} aside={`来自 stats.by_${dimension}`}>
-        <EmptyState title={`没有 ${dimension} 统计`} description="筛选范围内没有该维度的已启动节点；这是空结果，不是不可用。" />
+        <EmptyState title={`没有 ${dimension} 统计`} description="筛选范围内没有该维度的已启动节点。" />
       </Panel>
     )
   }
@@ -1015,7 +1015,7 @@ function GroupStatsPanel({ value, dimension }: { value: unknown; dimension: 'pro
       title={title}
       aside={`来自 stats.by_${dimension}`}
       note={dimension === 'provider'
-        ? '已启动节点数：节点有 started_at 就计入，每个当前保存的节点行只计一次。不按状态筛选，运行中、已完成和失败的节点都计入；不等于 LLM 调用次数或重试尝试次数。无 provider 的节点只计入 block。这里显示当前保存的最新一次尝试，不是重试历史。'
+        ? '已启动节点数：有 started_at 的节点计入，每个当前保存的节点行只计一次，不按状态筛选；不等于 LLM 调用次数或重试次数。无 provider 的节点只计入 block。显示的是当前保存的最新一次尝试，不是重试历史。'
         : '与 Provider 统计同一已启动节点口径；Block 始终存在，无 provider 的节点也会显示在这里。'}
     >
       <GroupStatsTable rows={state.rows} dimension={dimension} />
@@ -1067,7 +1067,7 @@ function StatsContent({ stats }: { stats: Stats }) {
           <div className={styles.budgetRow}>
             {decisions.map((row) => <Badge key={row.label} tone={row.label === 'publish' ? 'ok' : row.label === 'mark' ? 'warn' : 'neutral'}>{row.label}: {row.count}</Badge>)}
           </div>
-        ) : <EmptyState title="没有处置分布数据" description="stats.decisions 缺失或为空；显示不可用，而不是零值。" />}
+        ) : <EmptyState title="没有处置分布数据" description="stats.decisions 缺失或为空；显示不可用，不显示零值。" />}
       </Panel>
 
       <QualityPanel value={stats.quality_by_provider} />
@@ -1121,7 +1121,7 @@ function CollectionHealthPanel({ value }: { value?: FeedbackCollectionState }) {
       </div>
       {failing ? (
         <p className="small" role="alert">
-          反馈采集最近失败（{value.last_error_class}）；采集成功后该状态会被清除。
+          反馈采集最近失败（{value.last_error_class}）；采集成功后清除。
         </p>
       ) : (
         <p className="small" role="status">当前没有记录的采集错误。</p>
@@ -1146,7 +1146,7 @@ function WorkspaceCapacityPanel({ value }: { value?: WorkspaceCapacity }) {
     <Panel
       title="工作区容量"
       aside="来自 stats.workspace_capacity"
-      note="容量按工作区根目录最近一次测量展示；未配置上限时 limit_bytes 为 0，不代表容量无限可用。"
+      note="容量取工作区根目录最近一次测量；未配置上限时 limit_bytes 为 0，并非容量无限。"
     >
       <div className={styles.statGrid}>
         <Metric

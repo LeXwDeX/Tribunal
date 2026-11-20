@@ -162,7 +162,7 @@ describe('Skill creation entries', () => {
     await user.upload(screen.getByLabelText('Skill zip 文件'), upload())
     const dialog = screen.getByRole('dialog', { name: '上传 Skill zip' })
     await user.click(within(dialog).getByRole('button', { name: '上传' }))
-    expect(await within(dialog).findByText(/请求结果可能不确定/)).toBeInTheDocument()
+    expect(await within(dialog).findByText(/结果可能不确定/)).toBeInTheDocument()
   })
 })
 

@@ -290,14 +290,14 @@ function publicationHint(state?: string, reason?: string): string {
       return 'GitLab 发布已确认完成。'
     case 'skipped':
       if (reason?.startsWith('stale:')) {
-        return `发布已跳过：${reason}。这是过期结果，不会自动重发，也不会自动修复。`
+        return `发布已跳过：${reason}。结果已过期，不会自动重发或修复。`
       }
       if (reason) return `发布已跳过：${reason}。`
       return '本次发布已跳过。'
     case 'failed':
       return 'GitLab 发布失败，不能视为 PASS。'
     default:
-      return '服务端没有返回发布状态；这不表示发布成功。'
+      return '服务端没有返回发布状态，不能视为发布成功。'
   }
 }
 
@@ -373,7 +373,7 @@ function PublicationsPanel({ review, mrUrl }: { review: ReviewDetail; mrUrl?: st
       ) : null}
       {!publications ? (
         <PanelBody className={rv.publicationEmpty}>
-          <EmptyState title="尚无发布结果记录" description="服务端未返回 publications 字段，不代表发布成功。" />
+          <EmptyState title="尚无发布结果记录" description="服务端未返回 publications 字段，不能视为发布成功。" />
         </PanelBody>
       ) : null}
       {commitNote ? <div className={ui.tableNote}>{commitNote}</div> : null}
@@ -847,7 +847,7 @@ export function ReviewDetailPage() {
               {findings.isPending ? <PanelBody><LoadingState label="正在读取问题…" /></PanelBody> : null}
               {findings.isError ? <PanelBody><ErrorState error={findings.error} onRetry={findings.retry} /></PanelBody> : null}
               {findings.isSuccess && findings.items.length === 0 ? (
-                <PanelBody><EmptyState title="没有符合条件的问题" description="调整级别筛选；这不表示评审没有产生过问题。" /></PanelBody>
+                <PanelBody><EmptyState title="没有符合条件的问题" description="调整级别筛选。" /></PanelBody>
               ) : null}
               {findings.items.length ? (
                 <DataTable label="问题列表" minWidth="lg">

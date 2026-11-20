@@ -509,7 +509,7 @@ export function ProfileEditor({ open, detail, models, onClose, onSaved, onReload
   const handleError = (err: unknown) => {
     if (err instanceof ApiError && err.status === 409) {
       setStale(true)
-      setFormError('档位覆盖已被他人修改，请刷新并重新加载后再保存。')
+      setFormError('档位覆盖已被他人修改，请重新加载后再保存。')
       return
     }
     if (err instanceof ApiError && err.status === 400 && err.details?.length) {

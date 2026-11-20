@@ -133,7 +133,7 @@ describe('node drawer diagnostics', () => {
       { id: 'synthesize', kind: 'synthesize', status: 'completed', token_free: true },
       { calls: [], next_cursor: '', retention: { details_purged: false } },
     )
-    expect(await screen.findByText('这是一段代码节点，没有模型调用。')).toBeInTheDocument()
+    expect(await screen.findByText('代码节点，没有模型调用。')).toBeInTheDocument()
 
     renderDrawer(
       { id: 'review.a', kind: 'review', status: 'completed' },

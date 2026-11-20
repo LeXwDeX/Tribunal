@@ -59,7 +59,7 @@ export function useReviewStream(reviewId: string | undefined, review: ReviewDeta
     }
     const onError = () => {
       setState('error')
-      setError('实时连接中断。可重试；页面数据不会因此显示为成功。')
+      setError('实时连接中断，可重试。')
       source.close()
     }
     const onNode = (event: MessageEvent<string>) => {

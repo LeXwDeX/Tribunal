@@ -164,9 +164,9 @@ describe('statistics daily trends', () => {
     expect(blockRow.getByText('2')).toBeInTheDocument()
     expect(within(blockTable).queryByRole('columnheader', { name: '成本' })).not.toBeInTheDocument()
 
-    expect(screen.getByText(/节点有 started_at 就计入/)).toBeInTheDocument()
-    expect(screen.getByText(/运行中、已完成和失败的节点都计入/)).toBeInTheDocument()
-    expect(screen.getByText(/不等于 LLM 调用次数或重试尝试次数/)).toBeInTheDocument()
+    expect(screen.getByText(/有 started_at 的节点计入/)).toBeInTheDocument()
+    expect(screen.getByText(/不按状态筛选/)).toBeInTheDocument()
+    expect(screen.getByText(/不等于 LLM 调用次数或重试次数/)).toBeInTheDocument()
     expect(screen.getByText(/无 provider 的节点只计入 block/)).toBeInTheDocument()
     expect(screen.getByText(/最新一次尝试，不是重试历史/)).toBeInTheDocument()
   })

@@ -337,8 +337,8 @@ export function ErrorState({ error, onRetry, title = '加载失败', hint }: { e
   const message = protectedUser
     ? '该账号由配置来源或当前登录账号保护，不能在此停用或降级。请修改配置来源，或改用其他管理员账号。'
     : csrfInvalid
-      ? '控制台已自动刷新登录凭据并重试一次，仍被拒绝。请刷新页面后重新操作。'
-      : forbidden ? '当前账号没有执行此操作的权限。' : errorMessage(error)
+      ? '已自动刷新登录凭据并重试一次，仍被拒绝。请刷新页面后重试。'
+      : forbidden ? '当前账号无权执行此操作。' : errorMessage(error)
   return (
     <div className={styles.errorBox} role="alert">
       <strong>{heading}</strong>
@@ -1953,7 +1953,7 @@ export function SecretField({ label, value }: { label: string; value: string }) 
         <input id={id} className="input" readOnly value={value} onFocus={(event) => event.currentTarget.select()} />
         <CopyButton value={value} />
       </div>
-      <span className={styles.hint}>只显示这一次，关闭后将无法再次查看。</span>
+      <span className={styles.hint}>仅显示一次，关闭后无法再次查看。</span>
     </div>
   )
 }

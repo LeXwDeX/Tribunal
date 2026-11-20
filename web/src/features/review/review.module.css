@@ -171,7 +171,8 @@
 
 .diagnosticsList {
   margin: 0;
-  padding-left: 1.2em;
+  padding: 0;
+  list-style: none;
   display: flex;
   flex-direction: column;
   gap: var(--space-sm);
@@ -545,7 +546,8 @@
 
 .chain {
   display: inline-flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  white-space: nowrap;
   align-items: center;
   gap: var(--space-2xs);
 }

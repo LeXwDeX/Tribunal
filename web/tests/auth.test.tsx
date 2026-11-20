@@ -52,7 +52,7 @@ describe('authentication boundary', () => {
         </MemoryRouter>
       </QueryClientProvider>,
     )
-    expect(await screen.findByText(/当前会话已在其他登录中被替换/)).toBeInTheDocument()
+    expect(await screen.findByText(/当前会话已被其他登录替换/)).toBeInTheDocument()
   })
 
   it('hides the login action when the server reports OAuth disabled', async () => {
