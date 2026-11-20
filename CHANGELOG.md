@@ -2,6 +2,20 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.9.2] - 2026-11-20
+
+### 升级前必读
+
+- 仅涉及控制台前端：无数据库迁移，无配置变更。
+
+### 修复
+
+- **Findings 表的级别徽章不再逐字换行**（[#623](https://github.com/LeXwDeX/Tribunal/issues/623)）：共享表格单元格允许任意位置断行（`overflow-wrap: anywhere`），自动布局下列宽会被压到比徽章文字还窄，`P2`、`info` 于是逐字换成多行。现在，表格单元格里的级别徽章和状态徽章始终单行显示、不截断，级别列宽度按内容自适应。这项修改作用于全站所有表格。
+
+### 变更
+
+- **评审详情页隐藏 Findings 的「处置」筛选**（[#623](https://github.com/LeXwDeX/Tribunal/issues/623)）：去掉「全部 / 发布 / 存疑 / 丢弃 / 降级」分段控件，只保留级别筛选；控制台请求 findings 时不再携带 `decision` 参数。后端 `GET /api/v1/reviews/{id}/findings` 暂时仍接受 `decision` 参数，以兼容现有客户端；它的弃用与移除由 [#624](https://github.com/LeXwDeX/Tribunal/issues/624) 跟踪。
+
 ## [1.9.1] - 2026-11-20
 
 ### 升级前必读

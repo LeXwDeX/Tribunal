@@ -157,21 +157,18 @@ describe('findingFunnel', () => {
 describe('findings table', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it('filters by disposition with a segmented control that shows summary counts', async () => {
-    const fetchMock = renderDetail(review({
+  it('hides the disposition filter and keeps only the severity filter', async () => {
+    renderDetail(review({
       id: 'wf-seg',
       status: 'completed',
       verdict: 'BLOCKING',
       findings_summary: { published: 2, marked: 1, dropped: 3, by_severity: { P0: 0, P1: 2, P2: 3, info: 1 } },
     }))
-    const group = await screen.findByRole('group', { name: '按处置过滤' })
-    expect(within(group).getByRole('button', { name: /^全部/ })).toHaveAttribute('aria-pressed', 'true')
-    expect(within(group).getByRole('button', { name: /发布/ })).toHaveTextContent('2')
-    expect(within(group).getByRole('button', { name: /丢弃/ })).toHaveTextContent('3')
-    await userEvent.setup().click(within(group).getByRole('button', { name: /丢弃/ }))
-    expect(within(group).getByRole('button', { name: /丢弃/ })).toHaveAttribute('aria-pressed', 'true')
-    expect(screen.getByRole('combobox', { name: '按严重级别过滤' })).toBeInTheDocument()
-    void fetchMock
+    expect(await screen.findByRole('combobox', { name: '按严重级别过滤' })).toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: '按处置过滤' })).not.toBeInTheDocument()
+    const findingsCalls = vi.mocked(fetch).mock.calls.map(([url]) => String(url)).filter((url) => url.includes('/findings'))
+    expect(findingsCalls.length).toBeGreaterThan(0)
+    for (const url of findingsCalls) expect(url).not.toContain('decision=')
   })
 
   it('renders findings in the shared table and spans the expanded detail across every column', async () => {

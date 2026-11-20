@@ -9,7 +9,7 @@ import { Icon } from '../components/Icons'
 import { TriggerReviewDialog } from '../components/TriggerReviewDialog'
 import {
   ActionHint, Badge, Button, ButtonLink, ConfirmDialog, DataTable, Disclosure, EmptyState, ErrorState, LoadingState, Panel,
-  PanelBody, Pagination, PublicationBadge, RelativeTime, Segmented, Select, SeverityBadge, StatusBadge, classNames, useToast,
+  PanelBody, Pagination, PublicationBadge, RelativeTime, Select, SeverityBadge, StatusBadge, classNames, useToast,
 } from '../components/ui'
 import { ExecutionGraph } from '../features/review/ExecutionGraph'
 import { NodeDrawer } from '../features/review/NodeDrawer'
@@ -67,18 +67,6 @@ const challengeDot: Record<string, string> = {
   confirmed: rv.dotBad,
   refuted: rv.dotOk,
   uncertain: rv.dotMeh,
-}
-
-function decisionOptions(summary?: FindingsSummary) {
-  const bySeverity = summary?.by_severity
-  const total = bySeverity ? Object.values(bySeverity).reduce<number>((sum, count) => sum + (count || 0), 0) : undefined
-  return [
-    { value: '', label: '全部', count: total },
-    { value: 'publish', label: '发布', count: summary?.published },
-    { value: 'mark', label: '存疑', count: summary?.marked },
-    { value: 'drop', label: '丢弃', count: summary?.dropped },
-    { value: 'downgrade', label: '降级' },
-  ]
 }
 
 function FindingAnnotationEditor({
@@ -622,7 +610,6 @@ export function ReviewDetailPage() {
   const { id = '' } = useParams()
   const toast = useToast()
   const queryClient = useQueryClient()
-  const [decision, setDecision] = useState('')
   const [severity, setSeverity] = useState('')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null)
@@ -646,8 +633,8 @@ export function ReviewDetailPage() {
     enabled: Boolean(id),
   })
   const findings = usePaginated<Finding>(
-    ['review', id, 'findings', decision, severity],
-    (cursor) => listFindings(id, { decision: decision || undefined, severity: severity || undefined }, cursor),
+    ['review', id, 'findings', severity],
+    (cursor) => listFindings(id, { severity: severity || undefined }, cursor),
     'findings',
     { enabled: Boolean(id) },
   )
@@ -677,7 +664,7 @@ export function ReviewDetailPage() {
 
   useEffect(() => {
     setExpanded(new Set())
-  }, [id, decision, severity])
+  }, [id, severity])
 
   if (!id) return <main className={ui.page}><ErrorState error={new Error('URL 中没有评审 ID。')} title="无法打开评审" /></main>
   if (detail.isPending) return <main className={ui.page}><LoadingState label="正在读取评审详情…" /></main>
@@ -748,7 +735,7 @@ export function ReviewDetailPage() {
     return updated
   }
 
-  const filtered = Boolean(decision || severity)
+  const filtered = Boolean(severity)
   const findingsCount = findings.isSuccess ? `${findings.items.length}${findings.hasNextPage ? '+' : ''} 条` : ''
 
   return (
@@ -844,12 +831,6 @@ export function ReviewDetailPage() {
               title={<>Findings {findingsCount ? <small>{findingsCount}</small> : null}</>}
               aside={(
                 <div className={rv.findingFilters}>
-                  <Segmented
-                    label="按处置过滤"
-                    options={decisionOptions(review.findings_summary)}
-                    value={decision}
-                    onChange={setDecision}
-                  />
                   <span className={rv.severityFilter}>
                     <Select
                       value={severity}
@@ -866,7 +847,7 @@ export function ReviewDetailPage() {
               {findings.isPending ? <PanelBody><LoadingState label="正在读取问题…" /></PanelBody> : null}
               {findings.isError ? <PanelBody><ErrorState error={findings.error} onRetry={findings.retry} /></PanelBody> : null}
               {findings.isSuccess && findings.items.length === 0 ? (
-                <PanelBody><EmptyState title="没有符合条件的问题" description="调整处置或级别筛选；这不表示评审没有产生过问题。" /></PanelBody>
+                <PanelBody><EmptyState title="没有符合条件的问题" description="调整级别筛选；这不表示评审没有产生过问题。" /></PanelBody>
               ) : null}
               {findings.items.length ? (
                 <DataTable label="问题列表" minWidth="lg">

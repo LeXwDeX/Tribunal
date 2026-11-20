@@ -18,6 +18,14 @@ describe('findings row alignment', () => {
     expect(shared).toMatch(/\.table td \{[^}]*vertical-align: middle/)
   })
 
+  it('keeps severity and status badges on one line inside table cells', () => {
+    const shared = readFileSync(resolve(process.cwd(), 'src/styles/ui.module.css'), 'utf8')
+    expect(shared).toMatch(/\.sev \{[^}]*white-space: nowrap/)
+    expect(shared).toMatch(/\.table td \.badge,\s*\.table td \.sev \{[^}]*flex: none;[^}]*max-width: none/)
+    const review = readFileSync(resolve(process.cwd(), 'src/features/review/review.module.css'), 'utf8')
+    expect(review).toMatch(/\.sevCell \{[^}]*white-space: nowrap/)
+  })
+
   it('renders a long title, downgraded severity and annotation in one four-cell row', () => {
     const longTitle = `并发写 map 未加锁${'，缺少同步保护'.repeat(40)}`
     render(
