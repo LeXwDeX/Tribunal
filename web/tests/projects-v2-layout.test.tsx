@@ -162,6 +162,34 @@ describe('projects list v2 layout', () => {
     expect(await screen.findByTestId('location')).toHaveTextContent('/projects/42')
   })
 
+  it('lights only the current registration step in shared bot mode', async () => {
+    installFetch((url, init) => {
+      if (url === '/api/v1/projects/validate' && init?.method === 'POST') {
+        return jsonResponse({
+          project_id: 42, path_with_namespace: 'group/backend', web_url: 'https://gitlab.example.com/group/backend', default_branch: 'main',
+          username: 'review-bot', access_level: 40, token_scopes: ['api'], git_head: 'abc', shared_credential: true,
+        })
+      }
+      if (url.startsWith('/api/v1/projects')) return jsonResponse({ projects: [] })
+      if (url.startsWith('/api/v1/profiles')) return jsonResponse({ profiles: [] })
+      return jsonResponse({})
+    })
+    const user = userEvent.setup()
+    renderWithProviders(<ProjectsPage />, { route: '/projects', me: { ...adminMe, shared_bot_credential: true } })
+    await user.click((await screen.findAllByRole('button', { name: '注册项目' }))[0])
+
+    const steps = screen.getByRole('list', { name: '注册步骤' })
+    expect(within(steps).getByText('校验连接（可选）').closest('li')).toHaveAttribute('aria-current', 'step')
+    expect(within(steps).getByText('保存并初始化').closest('li')).not.toHaveAttribute('aria-current')
+    const input = screen.getByLabelText('仓库地址或项目 ID')
+    expect(input.closest('.formGrid')).toBeNull()
+    await user.type(input, 'group/backend')
+    await user.click(screen.getByRole('button', { name: '校验连接' }))
+    await screen.findByText('校验通过，尚未保存')
+    expect(within(steps).getByText('保存并初始化').closest('li')).toHaveAttribute('aria-current', 'step')
+    expect(within(steps).getByText('校验连接（可选）').closest('li')).not.toHaveAttribute('aria-current')
+  })
+
   it('marks the registration steps as validation progresses', async () => {
     installFetch((url, init) => {
       if (url === '/api/v1/projects/validate' && init?.method === 'POST') {
