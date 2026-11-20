@@ -63,6 +63,12 @@ describe('table primitive guard', () => {
     expect(offenders).toEqual([])
   })
 
+  it('pads the outer edge cells like the panel toolbar and header', () => {
+    const css = readFileSync(join(root, 'styles', 'ui.module.css'), 'utf8')
+    expect(css).toMatch(/\.table th:first-child,\s*\.table td:first-child\s*\{[^}]*padding-left:\s*var\(--space-lg\)/)
+    expect(css).toMatch(/\.table th:last-child,\s*\.table td:last-child\s*\{[^}]*padding-right:\s*var\(--space-lg\)/)
+  })
+
   it('never caps table height or scrolls tables vertically', () => {
     const css = readFileSync(join(root, 'styles', 'ui.module.css'), 'utf8')
     const block = (name: string) => css.match(new RegExp(`\\.${name}\\s*\\{([^}]*)\\}`))?.[1] ?? ''
