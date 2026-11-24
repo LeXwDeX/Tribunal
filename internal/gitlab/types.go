@@ -17,6 +17,10 @@ type FileDiff struct {
 	GeneratedFile bool
 	Collapsed     bool
 	TooLarge      bool
+	// Undiffable reports a body GitLab withheld that diff recovery found to be
+	// a non-diffable resource (for example a multi-megabyte single-line blob).
+	// Such a file is an explicit omission, not recoverable review content.
+	Undiffable bool
 	// Collection reports the diff version scope of the whole list. It is set
 	// on the first entry only, when the collector could read the merge
 	// request's reported changed-path count.

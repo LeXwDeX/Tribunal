@@ -40,6 +40,10 @@ func (f *rawFileGitLab) GetRawFile(_ context.Context, _ string, _ int64, path, r
 	return nil, &gitlab.Error{Op: "get_raw_file", Status: 404}
 }
 
+func (f *rawFileGitLab) GetRawFileSized(ctx context.Context, token string, projectID int64, path, ref string, _ int64) ([]byte, error) {
+	return f.GetRawFile(ctx, token, projectID, path, ref)
+}
+
 func newScopeService(fake *rawFileGitLab) *ReviewService {
 	return &ReviewService{gitlab: fake}
 }
@@ -168,7 +172,7 @@ func TestApplyDiffScopeRejectsBinaryAndOversizedBodies(t *testing.T) {
 	}{
 		{name: "binary", head: "alpha\x00beta\n"},
 		{name: "invalid utf8", head: "alpha\xffbeta\n"},
-		{name: "oversized", head: strings.Repeat("x", maxRecoveredFileBytes+1) + "\n"},
+		{name: "oversized", head: strings.Repeat("x", int(maxRecoveredRawFileBytes+1)) + "\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

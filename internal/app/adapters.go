@@ -41,6 +41,7 @@ type GitLabClient interface {
 	GetJobTrace(ctx context.Context, token string, projectID, jobID int64) (string, error)
 	ListClosingIssues(ctx context.Context, token string, projectID, iid int64) ([]gitlab.Issue, error)
 	GetRawFile(ctx context.Context, token string, projectID int64, path, ref string) ([]byte, error)
+	GetRawFileSized(ctx context.Context, token string, projectID int64, path, ref string, limit int64) ([]byte, error)
 	ListMRNotes(ctx context.Context, token string, projectID, iid int64) ([]gitlab.Note, error)
 	CreateMRNote(ctx context.Context, token string, projectID, iid int64, body string) (*gitlab.Note, error)
 	UpdateMRNote(ctx context.Context, token string, projectID, iid, noteID int64, body string) error
