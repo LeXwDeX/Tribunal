@@ -557,7 +557,7 @@ func (e *Executor) executeExplore(ctx context.Context, in dag.NodeInput) (dag.No
 		Decode: func(raw json.RawMessage) (any, error) { return DecodeStrict[*ExploreOut](raw) },
 	}
 	var gaps []string
-	result, err := e.callAgent(ctx, in, agentOptions{
+	opts := agentOptions{
 		Role:       role,
 		Provider:   params.Provider,
 		Block:      BlockExplore,
@@ -567,12 +567,26 @@ func (e *Executor) executeExplore(ctx context.Context, in dag.NodeInput) (dag.No
 		BlockTools: true,
 		BeforeTurn: e.budgetHook(in.WorkflowID),
 		ToolGaps:   &gaps,
-	})
+	}
+	result, err := e.callAgent(ctx, in, opts)
 	if err != nil {
-		if out, ok := e.downgradePartialLane(ctx, in, err); ok {
-			return out, nil
+		// A context overflow is the one explore failure worth a bounded second
+		// attempt: the tool loop read until the window filled. Halve the turn
+		// budget so the retry gathers less and leaves room to submit; any other
+		// class is a real failure and falls through to the partial-lane path.
+		if retry, ok := e.exploreRetryOptions(opts, err); ok {
+			// Drop gaps from the abandoned attempt so the retry records its own;
+			// retry.ToolGaps still points at gaps, so resetting the variable
+			// clears it for the second call.
+			gaps = nil
+			result, err = e.callAgent(ctx, in, retry)
 		}
-		return dag.NodeOutput{}, err
+		if err != nil {
+			if out, ok := e.downgradePartialLane(ctx, in, err); ok {
+				return out, nil
+			}
+			return dag.NodeOutput{}, err
+		}
 	}
 	out, ok := result.Output.(*ExploreOut)
 	if !ok || out == nil {
@@ -580,6 +594,38 @@ func (e *Executor) executeExplore(ctx context.Context, in dag.NodeInput) (dag.No
 	}
 	out.ToolGaps = gaps
 	return e.marshalAgentOutput(out, result.Usage)
+}
+
+// exploreRetryOptions reports whether a failed explore call should be retried
+// with a halved turn budget and, if so, returns the retry options. Only a
+// context overflow qualifies: the tool loop read until the window filled, so
+// fewer turns gather less and leave room to submit. Every other class
+// (no_submit, invalid_submit, budget, ...) is a real failure and is not
+// retried here; the caller still downgrades the partial lane for those.
+func (e *Executor) exploreRetryOptions(opts agentOptions, err error) (agentOptions, bool) {
+	var partial *PartialRunError
+	if !errors.As(err, &partial) || partial == nil || partial.Class != contextTooLongClass {
+		return agentOptions{}, false
+	}
+	retry := opts
+	retry.MaxTurns = exploreRetryMaxTurns(e.profile.Config.Budget.MaxTurns)
+	return retry, true
+}
+
+// exploreRetryMaxTurns halves the turn budget for the one context_too_long
+// retry. A profile that sets no MaxTurns inherits the agent default (zero =
+// unlimited), which halves to the lower bound of 1: the retry is then
+// maximally conservative.
+func exploreRetryMaxTurns(profileMaxTurns int) int {
+	maxTurns := profileMaxTurns
+	if maxTurns <= 0 {
+		maxTurns = agent.DefaultMaxTurns
+	}
+	retry := maxTurns / 2
+	if retry < 1 {
+		retry = 1
+	}
+	return retry
 }
 
 func (e *Executor) executeReviewLane(ctx context.Context, in dag.NodeInput) (dag.NodeOutput, error) {
