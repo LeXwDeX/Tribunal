@@ -163,7 +163,7 @@ review_defaults:                    # 项目设置的默认值（见 §3）
   skip_draft: true
   ignore: ["**/*.lock", "**/vendor/**", "**/node_modules/**", "**/*.pb.go", "**/*_generated.*", "**/*.min.js"]
   max_files: 200
-  max_diff_lines: 8000
+  max_diff_lines: 30000
   commit_status: false
   post_failure_note: true
   show_model_attribution: false

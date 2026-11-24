@@ -12,7 +12,7 @@ import (
 const (
 	reviewDefaultMaxFiles     = 200
 	reviewMaxFilesHardLimit   = 200
-	reviewDefaultMaxDiffLines = 8000
+	reviewDefaultMaxDiffLines = 30000
 	reviewDefaultLanguage     = "zh-CN"
 )
 

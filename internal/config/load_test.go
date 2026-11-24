@@ -65,7 +65,7 @@ func TestLoadDefaults(t *testing.T) {
 	if !cfg.ReviewDefaults.SkipDraft {
 		t.Error("review_defaults.skip_draft default must be true")
 	}
-	if cfg.ReviewDefaults.Language != "zh-CN" || cfg.ReviewDefaults.MaxFiles != 200 || cfg.ReviewDefaults.MaxDiffLines != 8000 {
+	if cfg.ReviewDefaults.Language != "zh-CN" || cfg.ReviewDefaults.MaxFiles != 200 || cfg.ReviewDefaults.MaxDiffLines != 30000 {
 		t.Errorf("review defaults = %+v", cfg.ReviewDefaults)
 	}
 	if !cfg.ReviewDefaults.PostFailureNote || !cfg.ReviewDefaults.AllowRepoConfig || cfg.ReviewDefaults.AllowRepoSkills {
