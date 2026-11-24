@@ -487,6 +487,15 @@ func buildReviewFiles(diffs []gitlab.FileDiff, ignores []string, maxFiles, maxDi
 			omitDiff(filePath, "max_files", diff)
 			continue
 		}
+		if diff.Undiffable {
+			// Recovery identified the withheld body as a non-diffable resource
+			// (an embedded blob). Record a distinct reason so the omission is
+			// not mistaken for recoverable too_large content.
+			omitDiff(filePath, "undiffable_resource", diff)
+			warnings = append(warnings, fmt.Sprintf(
+				"review coverage gap: GitLab withheld a non-diffable resource for %s; the file was not reviewed", filePath))
+			continue
+		}
 		if diff.TooLarge || diff.Collapsed {
 			// GitLab withheld the body and the collector could not recover it.
 			// Record the path and reason so the omission is visible; never

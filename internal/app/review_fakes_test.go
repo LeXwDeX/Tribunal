@@ -185,6 +185,10 @@ func (f *reviewGitLab) GetRawFile(_ context.Context, _ string, _ int64, path, _ 
 	return nil, &gitlab.Error{Op: "get_raw_file", Status: 404}
 }
 
+func (f *reviewGitLab) GetRawFileSized(ctx context.Context, token string, projectID int64, path, ref string, _ int64) ([]byte, error) {
+	return f.GetRawFile(ctx, token, projectID, path, ref)
+}
+
 func (f *reviewGitLab) ListMRNotes(context.Context, string, int64, int64) ([]gitlab.Note, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -102,6 +102,46 @@ func TestGetRawFileBoundary(t *testing.T) {
 	}
 }
 
+// GetRawFileSized honors a larger limit so diff recovery can read a body the
+// ordinary 512KB GetRawFile bound would reject.
+func TestGetRawFileSizedHonorsLargerLimit(t *testing.T) {
+	size := MaxRawFileBytes + 4096
+	body := &countingBody{remaining: int64(size)}
+	client := newBodyClient(t, http.StatusOK, body)
+	data, err := client.GetRawFileSized(context.Background(), "token", 42, "mid.txt", "main", MaxRecoveryFileBytes)
+	if err != nil || len(data) != size {
+		t.Fatalf("GetRawFileSized = %d bytes, %v; want %d", len(data), err, size)
+	}
+	if !body.closed {
+		t.Fatal("body was not closed")
+	}
+}
+
+// GetRawFileSized still returns ErrFileTooLarge once the body crosses its
+// (larger) limit.
+func TestGetRawFileSizedEnforcesLimit(t *testing.T) {
+	body := &countingBody{remaining: int64(MaxRecoveryFileBytes + 1)}
+	client := newBodyClient(t, http.StatusOK, body)
+	if _, err := client.GetRawFileSized(context.Background(), "token", 42, "big.txt", "main", MaxRecoveryFileBytes); !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("error = %v, want ErrFileTooLarge", err)
+	}
+	if body.read != MaxRecoveryFileBytes+1 {
+		t.Fatalf("read %d bytes, want %d", body.read, MaxRecoveryFileBytes+1)
+	}
+}
+
+// GetRawFile still caps at MaxRawFileBytes even though a larger bound exists.
+func TestGetRawFileStillCapsAtRawFileBound(t *testing.T) {
+	body := &countingBody{remaining: MaxRawFileBytes + 1}
+	client := newBodyClient(t, http.StatusOK, body)
+	if _, err := client.GetRawFile(context.Background(), "token", 42, "big.txt", "main"); !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("error = %v, want ErrFileTooLarge", err)
+	}
+	if body.read != MaxRawFileBytes+1 {
+		t.Fatalf("read %d bytes, want %d", body.read, MaxRawFileBytes+1)
+	}
+}
+
 // A failed raw file request keeps the sanitized GitLab error shape.
 func TestGetRawFileMapsUpstreamStatus(t *testing.T) {
 	client := newBodyClient(t, http.StatusNotFound, &countingBody{remaining: 0})

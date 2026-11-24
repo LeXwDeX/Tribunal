@@ -12,6 +12,12 @@ import (
 // an arbitrarily large blob never reaches memory before that check.
 const MaxRawFileBytes = 512 << 10
 
+// MaxRecoveryFileBytes bounds one raw repository file body read for diff
+// recovery. Recovery rebuilds a diff GitLab withheld as too_large, so it must
+// accept bodies the ordinary MaxRawFileBytes bound rejects; it is still capped
+// so an arbitrarily large blob never reaches memory.
+const MaxRecoveryFileBytes = 4 << 20
+
 // ErrFileTooLarge reports a raw repository file above MaxRawFileBytes. It is
 // a permanent outcome: callers must not treat it as a transient upstream
 // failure and retry it.

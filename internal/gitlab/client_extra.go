@@ -403,8 +403,20 @@ func (c *Client) ListClosingIssues(ctx context.Context, token string, projectID,
 // body is bounded by MaxRawFileBytes while it is read: a larger file returns
 // ErrFileTooLarge instead of being buffered whole and rejected afterwards.
 func (c *Client) GetRawFile(ctx context.Context, token string, projectID int64, path, ref string) ([]byte, error) {
+	return c.GetRawFileSized(ctx, token, projectID, path, ref, MaxRawFileBytes)
+}
+
+// GetRawFileSized reads a file from the given ref and bounds the body at limit
+// bytes while it is read: a larger file returns ErrFileTooLarge instead of
+// being buffered whole and rejected afterwards. Diff recovery passes a larger
+// limit than GetRawFile so it can rebuild a diff for a body GitLab withheld as
+// too_large.
+func (c *Client) GetRawFileSized(ctx context.Context, token string, projectID int64, path, ref string, limit int64) ([]byte, error) {
 	if projectID <= 0 {
 		return nil, errors.New("gitlab: invalid project ID")
+	}
+	if limit <= 0 {
+		limit = MaxRawFileBytes
 	}
 	if err := validateRepoPath(path); err != nil {
 		return nil, err
@@ -421,7 +433,7 @@ func (c *Client) GetRawFile(ctx context.Context, token string, projectID int64, 
 	// Path and query escaping match the SDK so the request stays identical.
 	rawURL := fmt.Sprintf("%s/api/v4/projects/%d/repository/files/%s/raw?ref=%s",
 		c.baseURL, projectID, sdk.PathEscape(path), url.QueryEscape(ref))
-	body, tooLarge, err := c.getBounded(reqCtx, token, "get_raw_file", rawURL, MaxRawFileBytes)
+	body, tooLarge, err := c.getBounded(reqCtx, token, "get_raw_file", rawURL, limit)
 	if err != nil {
 		return nil, err
 	}
