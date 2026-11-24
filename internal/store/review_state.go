@@ -185,6 +185,13 @@ const (
 	ReviewReactionNone = "none"
 )
 
+// ReviewStatusCredentialError prefixes the stored last_error of a status row
+// whose only failure was a rejected GitLab credential (HTTP 401/403). Such a
+// row is settled, because retrying the same credential cannot succeed, but it
+// stays identifiable: once the credential is verified again the row is
+// reopened and the note is written without waiting for a new review.
+const ReviewStatusCredentialError = "credential rejected"
+
 // ReviewStatus is the desired status note for one merge request. Generation
 // and HeadSHA fence a late worker; Version/AppliedVersion let a retry detect
 // that a newer desired state replaced the one it started to publish.

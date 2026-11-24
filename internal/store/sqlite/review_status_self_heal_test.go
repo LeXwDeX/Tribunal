@@ -199,3 +199,105 @@ func TestMarkReviewStatusVerifiedAdvancesClockWithoutChangingVersion(t *testing.
 		t.Fatalf("stale version changed row: %+v, %v", row, err)
 	}
 }
+
+// TestSelfHealScanIncludesCredentialBlockedRows pins the recovery path for a
+// rejected credential: the row is applied and settled, but it keeps the
+// credential marker so the low-frequency scan revisits it. A verified write
+// clears the marker and the row leaves the set.
+func TestSelfHealScanIncludesCredentialBlockedRows(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	st := openTestStore(t, clock)
+	mustProject(t, st, 42)
+	seedPendingStatus(t, st, 42, 7)
+	applyStatus(t, st, 42, 7, store.ReviewStatusFailed)
+	row, err := st.GetReviewStatus(ctx, 42, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := store.ReviewStatusCredentialError + ": project token was rejected by GitLab (HTTP 401); replace the project token"
+	if err := st.MarkReviewStatusApplied(ctx, 42, 7, int64(row.Version), 0, "", blocked); err != nil {
+		t.Fatal(err)
+	}
+
+	// The fast scan still ignores an applied row; the marker alone does not
+	// make the credential retry in a loop.
+	rows, err := st.ListReviewStatusesForVerification(ctx, 42, 0)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("credential-blocked row in fast scan: %+v, %v", rows, err)
+	}
+
+	clock.Advance(25 * time.Hour)
+	cutoff := clock.Now().Add(-24 * time.Hour)
+	rows, err = st.ListAppliedReviewStatusesForSelfHeal(ctx, 42, 0, cutoff)
+	if err != nil {
+		t.Fatalf("ListAppliedReviewStatusesForSelfHeal: %v", err)
+	}
+	if len(rows) != 1 || rows[0].MRIID != 7 {
+		t.Fatalf("self-heal rows = %+v, want the credential-blocked MR 7", rows)
+	}
+
+	if err := st.MarkReviewStatusVerified(ctx, 42, 7, int64(row.Version), 0, "", clock.Now().UTC()); err != nil {
+		t.Fatalf("MarkReviewStatusVerified: %v", err)
+	}
+	verified, err := st.GetReviewStatus(ctx, 42, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified.LastError != "" {
+		t.Fatalf("verified row kept its error marker: %+v", verified)
+	}
+	rows, err = st.ListAppliedReviewStatusesForSelfHeal(ctx, 42, 0, clock.Now().Add(-24*time.Hour))
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("verified row still in self-heal scan: %+v, %v", rows, err)
+	}
+}
+
+// TestReopenCredentialBlockedReviewStatuses rewinds only the rows a rejected
+// credential had settled, so a recovered token gets their note written.
+func TestReopenCredentialBlockedReviewStatuses(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t, newFakeClock())
+	mustProject(t, st, 42)
+	seedPendingStatus(t, st, 42, 7)
+	applyStatus(t, st, 42, 7, store.ReviewStatusFailed)
+	row, err := st.GetReviewStatus(ctx, 42, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkReviewStatusApplied(ctx, 42, 7, int64(row.Version), 0, "",
+		store.ReviewStatusCredentialError+": replaced token"); err != nil {
+		t.Fatal(err)
+	}
+	// An unrelated applied row keeps its outcome.
+	seedPendingStatus(t, st, 42, 8)
+	applyStatus(t, st, 42, 8, store.ReviewStatusPass)
+
+	reopened, err := st.ReopenCredentialBlockedReviewStatuses(ctx, 42)
+	if err != nil {
+		t.Fatalf("ReopenCredentialBlockedReviewStatuses: %v", err)
+	}
+	if reopened != 1 {
+		t.Fatalf("reopened = %d, want 1", reopened)
+	}
+	blocked, err := st.GetReviewStatus(ctx, 42, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blocked.AppliedVersion != 0 || blocked.Version <= 0 {
+		t.Fatalf("credential-blocked row was not rewound: %+v", blocked)
+	}
+	healthy, err := st.GetReviewStatus(ctx, 42, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if healthy.AppliedVersion != healthy.Version {
+		t.Fatalf("healthy row was reopened: %+v", healthy)
+	}
+	// Reopening twice is a no-op: the row is no longer applied, so it is not
+	// selected again even though the marker is still stored.
+	again, err := st.ReopenCredentialBlockedReviewStatuses(ctx, 42)
+	if err != nil || again != 0 {
+		t.Fatalf("second reopen = %d, %v", again, err)
+	}
+}

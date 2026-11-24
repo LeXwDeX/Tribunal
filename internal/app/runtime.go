@@ -323,12 +323,17 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 	// Configured names only: user models are resolved from the catalog at
 	// call time and never enter the profile hash (#299).
 	allowedProviders := providerNames(cfg.Providers)
+	// One credential health registry is shared by the review service (which
+	// records rejections seen by side-effect writes) and the project service
+	// (which records the periodic token check and reports the snapshot).
+	credentials := NewCredentialHealthRegistry(now)
 	reviews, err := NewReviewService(ReviewServiceConfig{
 		Store:             deps.Store,
 		Queue:             deps.Store,
 		GitLab:            deps.GitLab,
 		Cipher:            deps.Cipher,
 		SharedBotToken:    deps.SharedBotToken,
+		Credentials:       credentials,
 		Workspace:         workspaceManager,
 		Git:               gitBackend,
 		Engine:            engine,
@@ -466,6 +471,7 @@ func NewRuntime(ctx context.Context, cfg *config.Config, deps RuntimeDeps) (*Run
 		},
 		ValidationTimeout: cfg.GitLab.RequestTimeout,
 		PrecheckCacheTTL:  cfg.Limits.PrecheckCacheTTL,
+		Credentials:       credentials,
 		Logger:            logger,
 		Now:               now,
 	})
@@ -846,15 +852,36 @@ func (r *Runtime) reconcileWebhookHealth(ctx context.Context, interval time.Dura
 	}
 }
 
+// reconcileCredentialHealth verifies every enabled project's credential once at
+// startup and then periodically. It only reads token metadata and records
+// sanitized health; a failed check never blocks startup.
+func (r *Runtime) reconcileCredentialHealth(ctx context.Context, interval time.Duration) {
+	if r.projects == nil {
+		return
+	}
+	r.projects.ReconcileCredentialHealth(ctx)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			r.projects.ReconcileCredentialHealth(ctx)
+		}
+	}
+}
+
 // StartBackground starts the feedback, retention, run-cleanup, review
-// side-effect, low-frequency status self-heal and webhook health tickers.
-// The returned function stops them and waits at most five seconds; done closes when they exit.
+// side-effect, low-frequency status self-heal, webhook health and credential
+// health tickers. The returned function stops them and waits at most five
+// seconds; done closes when they exit.
 func (r *Runtime) StartBackground(ctx context.Context) (stop func(), done <-chan struct{}) {
 	r.startOnce.Do(func() {
 		bgCtx, cancel := context.WithCancel(ctx)
 		r.startStop = cancel
 		var wg sync.WaitGroup
-		wg.Add(6)
+		wg.Add(7)
 		go func() {
 			defer wg.Done()
 			r.feedback.Start(bgCtx, defaultFeedbackInterval)
@@ -878,6 +905,10 @@ func (r *Runtime) StartBackground(ctx context.Context) (stop func(), done <-chan
 		go func() {
 			defer wg.Done()
 			r.reconcileWebhookHealth(bgCtx, webhookHealthCheckInterval)
+		}()
+		go func() {
+			defer wg.Done()
+			r.reconcileCredentialHealth(bgCtx, credentialHealthCheckInterval)
 		}()
 		go func() {
 			wg.Wait()

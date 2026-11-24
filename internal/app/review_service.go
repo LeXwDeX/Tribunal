@@ -185,6 +185,9 @@ type ReviewService struct {
 	// targetGraphs indexes a review's base commit into a private code graph when
 	// the shared workspace index describes another commit; nil turns it off.
 	targetGraphs targetGraphBuilder
+	// credentials records a rejected credential seen by a side-effect write.
+	// A nil registry keeps the warning without the health record.
+	credentials *CredentialHealthRegistry
 }
 
 // ReviewServiceConfig configures ReviewService.
@@ -229,6 +232,9 @@ type ReviewServiceConfig struct {
 	// Queue is optional. It schedules the workspace refresh that follows a
 	// default branch change found during a review run.
 	Queue JobEnqueuer
+	// Credentials is optional. It records a credential rejected by a
+	// side-effect write so the failure is not silent.
+	Credentials *CredentialHealthRegistry
 }
 
 // NewReviewService validates dependencies and builds the F1/F2 service.
@@ -323,6 +329,7 @@ func NewReviewService(cfg ReviewServiceConfig) (*ReviewService, error) {
 		cancelWait:     wait,
 		queue:          cfg.Queue,
 		targetGraphs:   newTargetGraphBuilder(cfg.Git),
+		credentials:    cfg.Credentials,
 	}, nil
 }
 

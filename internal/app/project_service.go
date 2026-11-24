@@ -203,6 +203,9 @@ type ProjectService struct {
 	provisioningCache     *ttlCache[struct{}]
 	sharedTokenInfoCache  *ttlCache[gitlab.TokenInfo]
 	validationCache       *ttlCache[cachedValidation]
+	// credentials records the credential outcomes observed by the periodic
+	// token check. A nil registry disables the pass and the snapshot.
+	credentials *CredentialHealthRegistry
 
 	mu             sync.Mutex
 	sharedHealthMu sync.Mutex
@@ -272,8 +275,11 @@ type ProjectServiceConfig struct {
 	// shared token info and provisioning validity for this long. Zero disables
 	// caching; permission changes take effect after at most this TTL.
 	PrecheckCacheTTL time.Duration
-	Logger           *slog.Logger
-	Now              func() time.Time
+	// Credentials receives the credential outcomes observed by the periodic
+	// token check. It is optional; without it the pass is disabled.
+	Credentials *CredentialHealthRegistry
+	Logger      *slog.Logger
+	Now         func() time.Time
 }
 
 // NewProjectService builds the registration service.
@@ -326,6 +332,7 @@ func NewProjectService(cfg ProjectServiceConfig) (*ProjectService, error) {
 		provisioningCache:     newTTLCache[struct{}](cfg.PrecheckCacheTTL, now),
 		sharedTokenInfoCache:  newTTLCache[gitlab.TokenInfo](cfg.PrecheckCacheTTL, now),
 		validationCache:       newTTLCache[cachedValidation](cfg.PrecheckCacheTTL, now),
+		credentials:           cfg.Credentials,
 	}, nil
 }
 
