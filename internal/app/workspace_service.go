@@ -613,16 +613,17 @@ func (s *WorkspaceService) generateContext(ctx context.Context, project *store.P
 		return PermanentJob(fmt.Errorf("build onboarding graph: %w", err))
 	}
 	executor, err := review.NewExecutor(review.ExecutorDeps{
-		Dossier:  dossier,
-		Profile:  profile,
-		Blocks:   s.blocks,
-		Clients:  s.snapshotClients(),
-		Prompts:  s.prompts,
-		AgentRun: s.agentRun,
-		Snapshot: engineSnapshot(s.engine),
-		Tools:    s.tools,
-		Skills:   s.skills,
-		Outbound: outboundSender(ws),
+		Dossier:            dossier,
+		Profile:            profile,
+		Blocks:             s.blocks,
+		Clients:            s.snapshotClients(),
+		Prompts:            s.prompts,
+		AgentRun:           s.agentRun,
+		Snapshot:           engineSnapshot(s.engine),
+		Tools:              s.tools,
+		Skills:             s.skills,
+		Outbound:           outboundSender(ws),
+		MaxBackgroundRunes: cfg.Settings.MaxBackgroundRunes,
 	})
 	if err != nil {
 		return PermanentJob(fmt.Errorf("build onboarding executor: %w", err))

@@ -1057,7 +1057,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		if warning := review.BackgroundBudgetWarning(&review.Dossier{
 			Language: cfg.Settings.Language, CustomRules: cfg.Settings.CustomRules,
 			RepoDocs: repoDocs, ContextDocs: contextDoc,
-		}); warning != "" {
+		}, cfg.Settings.MaxBackgroundRunes); warning != "" {
 			dossierWarnings = append(dossierWarnings, warning)
 		}
 		cfg.Warnings = append(cfg.Warnings, dossierWarnings...)
@@ -1203,6 +1203,7 @@ func (s *ReviewService) RunReview(ctx context.Context, job *jobs.Job) (err error
 		Locate:                   locateFunc(diffIndex),
 		Outbound:                 outboundSender(ws),
 		RepositorySkillsVerified: execution.repositorySkillsVerified(),
+		MaxBackgroundRunes:       cfg.Settings.MaxBackgroundRunes,
 		Logger:                   s.logger,
 	})
 	if err != nil {

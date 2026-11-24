@@ -195,6 +195,10 @@ type ExecutorDeps struct {
 	// RepositorySkillsVerified is set only after the app layer revalidated the
 	// stored repository grants and the filtered snapshot for this execution.
 	RepositorySkillsVerified bool
+	// MaxBackgroundRunes bounds the project background prompt section. A value
+	// <= 0 keeps the package default (review.MaxBackgroundRunes). It is passed
+	// from ProjectSettings so the app layer can raise the historical budget.
+	MaxBackgroundRunes int
 	// Now is the clock the agent loop uses to measure turns against the
 	// deadline. Nil uses time.Now; tests inject a fake clock.
 	Now func() time.Time
@@ -1080,11 +1084,12 @@ func (e *Executor) callAgent(ctx context.Context, in dag.NodeInput, opts agentOp
 		}
 	}
 	built, err := BuildPrompt(PromptInput{
-		Bundle:            e.prompts,
-		Role:              opts.Role,
-		ProjectBackground: e.projectBackground(),
-		Skills:            skills,
-		Task:              opts.Task,
+		Bundle:             e.prompts,
+		Role:               opts.Role,
+		ProjectBackground:  e.projectBackground(),
+		Skills:             skills,
+		Task:               opts.Task,
+		MaxBackgroundRunes: e.deps.MaxBackgroundRunes,
 	})
 	if err != nil {
 		return nil, err

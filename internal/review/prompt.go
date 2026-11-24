@@ -48,6 +48,11 @@ type PromptInput struct {
 	Task              string
 	Tools             []ToolOutput
 	Nonce             string // optional; generated when empty
+	// MaxBackgroundRunes overrides the package-level MaxBackgroundRunes budget
+	// for the project background section. A value <= 0 falls back to the
+	// MaxBackgroundRunes constant so callers that leave it unset keep the
+	// historical 20000 budget.
+	MaxBackgroundRunes int
 }
 
 // BuiltPrompt is ready to convert into llm.Request. The stable system prefix
@@ -85,8 +90,12 @@ func BuildPrompt(in PromptInput) (BuiltPrompt, error) {
 
 	background := strings.ReplaceAll(in.ProjectBackground, "\r\n", "\n")
 	backgroundRunes := utf8.RuneCountInString(background)
-	truncated := backgroundRunes > MaxBackgroundRunes
-	background = truncateRunes(background, MaxBackgroundRunes)
+	maxBackground := in.MaxBackgroundRunes
+	if maxBackground <= 0 {
+		maxBackground = MaxBackgroundRunes
+	}
+	truncated := backgroundRunes > maxBackground
+	background = truncateRunes(background, maxBackground)
 	background = strings.ReplaceAll(background, "</project-background", "&lt;/project-background")
 
 	system := []SystemBlock{

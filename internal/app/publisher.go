@@ -453,7 +453,7 @@ func (p *Publisher) publish(ctx context.Context, workflowID string) error {
 	// Dossier warnings disclose material degradation recorded at collection
 	// time (missing context, withheld code graph, truncated background) (#457).
 	warnings = append(warnings, loaded.dossier.Warnings...)
-	if warning := review.BackgroundBudgetWarning(loaded.dossier); warning != "" {
+	if warning := review.BackgroundBudgetWarning(loaded.dossier, cfg.Settings.MaxBackgroundRunes); warning != "" {
 		warnings = append(warnings, warning)
 	}
 	for i := range original {

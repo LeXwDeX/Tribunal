@@ -820,6 +820,7 @@ var reviewDefaultsLeafKinds = map[string]leafKind{
 	"ignore":                 kindStringList,
 	"max_files":              kindInt,
 	"max_diff_lines":         kindInt,
+	"max_background_runes":   kindInt,
 	"commit_status":          kindBool,
 	"post_failure_note":      kindBool,
 	"show_model_attribution": kindBool,
@@ -1449,6 +1450,9 @@ func validateReviewDefaultsPolicy(cfg *Config) []reviewDefaultsProblem {
 	}
 	if defaults.MaxDiffLines <= 0 {
 		add("max_diff_lines", "review_defaults.max_diff_lines must be positive")
+	}
+	if defaults.MaxBackgroundRunes <= 0 {
+		add("max_background_runes", "review_defaults.max_background_runes must be positive")
 	}
 	if strings.TrimSpace(defaults.Language) == "" {
 		add("language", "review_defaults.language must not be empty")

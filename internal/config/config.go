@@ -392,14 +392,17 @@ type BlockBinding struct {
 // JSON tags intentionally omit omitempty on booleans so an explicit false
 // survives a settings round trip.
 type ProjectSettings struct {
-	Language             string            `yaml:"language" json:"language"`
-	SkipDraft            bool              `yaml:"skip_draft" json:"skip_draft"`
-	TargetBranches       []string          `yaml:"target_branches" json:"target_branches"`
-	LabelsInclude        []string          `yaml:"labels_include" json:"labels_include"`
-	LabelsExclude        []string          `yaml:"labels_exclude" json:"labels_exclude"`
-	Ignore               []string          `yaml:"ignore" json:"ignore"`
-	MaxFiles             int               `yaml:"max_files" json:"max_files"`
-	MaxDiffLines         int               `yaml:"max_diff_lines" json:"max_diff_lines"`
+	Language       string   `yaml:"language" json:"language"`
+	SkipDraft      bool     `yaml:"skip_draft" json:"skip_draft"`
+	TargetBranches []string `yaml:"target_branches" json:"target_branches"`
+	LabelsInclude  []string `yaml:"labels_include" json:"labels_include"`
+	LabelsExclude  []string `yaml:"labels_exclude" json:"labels_exclude"`
+	Ignore         []string `yaml:"ignore" json:"ignore"`
+	MaxFiles       int      `yaml:"max_files" json:"max_files"`
+	MaxDiffLines   int      `yaml:"max_diff_lines" json:"max_diff_lines"`
+	// MaxBackgroundRunes bounds the project background prompt section. Values
+	// that normalize to the built-in default keep the historical 20000 budget.
+	MaxBackgroundRunes   int               `yaml:"max_background_runes" json:"max_background_runes"`
 	CommitStatus         bool              `yaml:"commit_status" json:"commit_status"`
 	PostFailureNote      bool              `yaml:"post_failure_note" json:"post_failure_note"`
 	ShowModelAttribution bool              `yaml:"show_model_attribution" json:"show_model_attribution"`
