@@ -26,8 +26,8 @@ review_defaults:
 	cfg := loadConfig(t, path)
 	defaults := cfg.ReviewDefaults
 
-	if defaults.MaxFiles != 200 || defaults.MaxDiffLines != 8000 {
-		t.Fatalf("normalized limits = %d/%d, want 200/8000", defaults.MaxFiles, defaults.MaxDiffLines)
+	if defaults.MaxFiles != 200 || defaults.MaxDiffLines != 30000 {
+		t.Fatalf("normalized limits = %d/%d, want 200/30000", defaults.MaxFiles, defaults.MaxDiffLines)
 	}
 	if defaults.Language != "zh-CN" {
 		t.Fatalf("normalized language = %q, want zh-CN", defaults.Language)
@@ -67,7 +67,7 @@ func TestLoadKeepsValidReviewDefaultsWithoutWarnings(t *testing.T) {
 	if len(cfg.Warnings) != 0 {
 		t.Fatalf("valid defaults produced warnings: %v", cfg.Warnings)
 	}
-	if cfg.ReviewDefaults.MaxFiles != 200 || cfg.ReviewDefaults.MaxDiffLines != 8000 {
+	if cfg.ReviewDefaults.MaxFiles != 200 || cfg.ReviewDefaults.MaxDiffLines != 30000 {
 		t.Fatalf("valid defaults changed: %+v", cfg.ReviewDefaults)
 	}
 }
@@ -102,7 +102,7 @@ func TestOverlayWriterAllowsUnrelatedPatchOverInvalidInheritedDefaults(t *testin
 		t.Fatalf("apply over invalid inherited review_defaults: %v", err)
 	}
 	defaults := result.Candidate.Config.ReviewDefaults
-	if defaults.MaxDiffLines != 8000 || len(defaults.TargetBranches) != 0 {
+	if defaults.MaxDiffLines != 30000 || len(defaults.TargetBranches) != 0 {
 		t.Fatalf("candidate defaults were not normalized: %+v", defaults)
 	}
 	if len(result.Candidate.Warnings) == 0 {
@@ -119,7 +119,7 @@ func TestOverlayWriterAppliesValidReviewDefaultsOverInvalidInherited(t *testing.
 		t.Fatalf("apply valid review_defaults change: %v", err)
 	}
 	defaults := result.Candidate.Config.ReviewDefaults
-	if defaults.MaxFiles != 150 || defaults.MaxDiffLines != 8000 {
+	if defaults.MaxFiles != 150 || defaults.MaxDiffLines != 30000 {
 		t.Fatalf("candidate defaults = %+v, want max_files 150 and normalized max_diff_lines", defaults)
 	}
 }

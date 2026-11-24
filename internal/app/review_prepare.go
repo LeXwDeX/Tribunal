@@ -446,11 +446,14 @@ func buildReviewFiles(diffs []gitlab.FileDiff, ignores []string, maxFiles, maxDi
 			summary.Omitted[len(summary.Omitted)-1].OldPath = old
 		}
 	}
-	for _, diff := range diffs {
-		filePath := strings.TrimSpace(diff.NewPath)
-		if filePath == "" {
-			filePath = strings.TrimSpace(diff.OldPath)
-		}
+	// Order the diffs by review risk before applying the max_files and
+	// max_diff_lines budgets. GitLab returns paths in ascending order, so a
+	// plain truncation drops the tail of the tree (often the core source).
+	// The ordering is deterministic so the dossier and its config hash stay
+	// stable for the same input. The caller's slice is never mutated.
+	for _, item := range orderDiffsByRisk(diffs) {
+		diff := item.diff
+		filePath := reviewDiffPath(diff)
 		if !validRepoPath(filePath) {
 			label := invalidPathLabel(filePath)
 			omit(label, "invalid_path")
@@ -509,7 +512,7 @@ func buildReviewFiles(diffs []gitlab.FileDiff, ignores []string, maxFiles, maxDi
 				"review coverage gap: GitLab withheld the diff for %s (%s); the file was not reviewed", filePath, cause))
 			continue
 		}
-		additions, deletions := countDiffLines(diff.Diff)
+		additions, deletions := item.additions, item.deletions
 		if maxDiffLines > 0 && lines+additions+deletions > maxDiffLines {
 			omittedByLines++
 			omitDiff(filePath, "max_diff_lines", diff)
@@ -561,8 +564,90 @@ func buildReviewFiles(diffs []gitlab.FileDiff, ignores []string, maxFiles, maxDi
 			"review skipped %d generated file(s), which were not reviewed: %s",
 			len(generated), boundedFilePathList(generated, 12)))
 	}
+	// The omission list follows path order regardless of the risk ordering
+	// above, so a human scanning the summary sees a stable, readable list.
+	sort.SliceStable(summary.Omitted, func(i, j int) bool {
+		return summary.Omitted[i].Path < summary.Omitted[j].Path
+	})
 	sort.Strings(ignored)
 	return files, ignored, summary, warnings
+}
+
+// reviewDiffPath returns the path a diff is reviewed under: the new path when
+// present, otherwise the old path.
+func reviewDiffPath(diff gitlab.FileDiff) string {
+	if p := strings.TrimSpace(diff.NewPath); p != "" {
+		return p
+	}
+	return strings.TrimSpace(diff.OldPath)
+}
+
+// reviewDiffOrder pairs a diff with its precomputed line counts so ordering by
+// size never recounts lines.
+type reviewDiffOrder struct {
+	diff      gitlab.FileDiff
+	additions int
+	deletions int
+}
+
+// reviewCriticalPathTokens are lowercased substrings that mark a changed file
+// as higher review risk. Matching is case-insensitive and deterministic.
+var reviewCriticalPathTokens = []string{
+	"migration", "auth", "middleware", "config", "permission", "rbac", "权限",
+}
+
+// reviewCriticalPathDirs are leading path directories that hold core source.
+var reviewCriticalPathDirs = []string{"cmd/", "internal/", "pkg/"}
+
+// isCriticalReviewPath reports whether a path belongs to a high-risk area
+// (migrations, auth, middleware, config, permissions, or core source).
+func isCriticalReviewPath(filePath string) bool {
+	lower := strings.ToLower(filePath)
+	for _, token := range reviewCriticalPathTokens {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	for _, dir := range reviewCriticalPathDirs {
+		if strings.HasPrefix(lower, dir) {
+			return true
+		}
+	}
+	return false
+}
+
+// orderDiffsByRisk returns a deterministically ordered copy of diffs so the
+// max_files and max_diff_lines budgets keep the highest-risk files. Critical
+// paths (migrations, auth, middleware, config, permissions, core source) sort
+// ahead of everything else; within that group larger changes come first and
+// path breaks ties. Non-critical files keep their input order: the sort is
+// stable, so a given input always yields the same output (the dossier and its
+// config hash stay reproducible) without reordering files the caller relies on
+// arriving in GitLab's order. The caller's slice is never mutated.
+func orderDiffsByRisk(diffs []gitlab.FileDiff) []reviewDiffOrder {
+	ordered := make([]reviewDiffOrder, len(diffs))
+	for i, diff := range diffs {
+		additions, deletions := countDiffLines(diff.Diff)
+		ordered[i] = reviewDiffOrder{diff: diff, additions: additions, deletions: deletions}
+	}
+	sort.SliceStable(ordered, func(i, j int) bool {
+		a, b := ordered[i], ordered[j]
+		aCritical, bCritical := isCriticalReviewPath(reviewDiffPath(a.diff)), isCriticalReviewPath(reviewDiffPath(b.diff))
+		if aCritical != bCritical {
+			return aCritical
+		}
+		if !aCritical {
+			// Non-critical files keep their input order; the stable sort leaves
+			// them as GitLab delivered them.
+			return false
+		}
+		aSize, bSize := a.additions+a.deletions, b.additions+b.deletions
+		if aSize != bSize {
+			return aSize > bSize
+		}
+		return reviewDiffPath(a.diff) < reviewDiffPath(b.diff)
+	})
+	return ordered
 }
 
 // boundedFilePathList renders a bounded, safe path list for warnings.
