@@ -602,7 +602,9 @@ func (s *Store) RecordReviewStatusNoteID(ctx context.Context, projectID, mrIID i
 // MarkReviewStatusVerified records a low-frequency self-heal check for exactly
 // one version. It never changes the applied version, so a remote note that still
 // matches only advances the verification clock. A newer version makes the write
-// a no-op; its own job and receipt own the row.
+// a no-op; its own job and receipt own the row. A successful verification also
+// clears a stored last_error: the row is confirmed written, so a credential
+// marker left by an earlier attempt must not keep it in the retry set.
 func (s *Store) MarkReviewStatusVerified(ctx context.Context, projectID, mrIID, version, noteID int64, bodyHash string, verifiedAt time.Time) error {
 	if projectID <= 0 || mrIID <= 0 || version <= 0 {
 		return errors.New("sqlite: review status project id, mr iid, and version are required")
@@ -613,6 +615,7 @@ func (s *Store) MarkReviewStatusVerified(ctx context.Context, projectID, mrIID, 
 	_, err := s.db.ExecContext(ctx, `UPDATE review_status
 		SET note_id = COALESCE(NULLIF(?, 0), note_id),
 		    body_hash = COALESCE(NULLIF(?, ''), body_hash),
+		    last_error = '',
 		    last_verified_at = ?
 		WHERE project_id = ? AND mr_iid = ? AND version = ?`,
 		noteID, bodyHash, formatTime(verifiedAt.UTC()), projectID, mrIID, version)
@@ -620,6 +623,26 @@ func (s *Store) MarkReviewStatusVerified(ctx context.Context, projectID, mrIID, 
 		return fmt.Errorf("sqlite: mark review status verified: %w", err)
 	}
 	return nil
+}
+
+// ReopenCredentialBlockedReviewStatuses reopens applied rows whose only stored
+// failure was a rejected credential. The applied version is rewound so the
+// regular verification scan enqueues the status job again; the row keeps its
+// last_error marker until a write clears it, which also keeps a still-rejected
+// credential from turning the reopen into a retry loop. It returns the number
+// of reopened rows.
+func (s *Store) ReopenCredentialBlockedReviewStatuses(ctx context.Context, projectID int64) (int64, error) {
+	if projectID <= 0 {
+		return 0, errors.New("sqlite: review status project id is required")
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE review_status
+		SET applied_version = 0, updated_at = ?
+		WHERE project_id = ? AND applied_version >= version AND last_error LIKE ?`,
+		formatTime(s.now().UTC()), projectID, store.ReviewStatusCredentialError+"%")
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: reopen credential-blocked review statuses: %w", err)
+	}
+	return res.RowsAffected()
 }
 
 func (s *Store) reviewStatusWriteMiss(ctx context.Context, projectID, mrIID, version int64) error {
@@ -696,17 +719,21 @@ func (s *Store) ListReviewStatusesForVerification(ctx context.Context, projectID
 
 // ListAppliedReviewStatusesForSelfHeal pages successful applied terminal rows
 // that were not verified since verifiedBefore. Cancelled merge requests stop
-// status re-verification; rows whose last attempt failed terminally stay
-// settled. The caller enforces the low-frequency schedule.
+// status re-verification. Rows whose only failure was a rejected credential
+// stay in the set: their note was never written, so the scan retries them at
+// the low-frequency schedule instead of leaving a permanent silent last_error.
+// The caller enforces the low-frequency schedule.
 func (s *Store) ListAppliedReviewStatusesForSelfHeal(ctx context.Context, projectID, afterMRIID int64, verifiedBefore time.Time) ([]store.ReviewStatus, error) {
 	if verifiedBefore.IsZero() {
 		return nil, errors.New("sqlite: self-heal cutoff is required")
 	}
 	return s.listReviewStatuses(ctx, `SELECT `+reviewStatusColumns+` FROM review_status
-		WHERE project_id = ? AND mr_iid > ? AND applied_version >= version AND last_error = ''
+		WHERE project_id = ? AND mr_iid > ? AND applied_version >= version
+		  AND (last_error = '' OR last_error LIKE ?)
 		  AND state IN (?, ?, ?, ?, ?)
 		  AND last_verified_at < ?
 		ORDER BY mr_iid LIMIT ?`, projectID, afterMRIID,
+		store.ReviewStatusCredentialError+"%",
 		store.ReviewStatusPass, store.ReviewStatusBlocking, store.ReviewStatusIncomplete,
 		store.ReviewStatusFailed, store.ReviewStatusStale,
 		formatTime(verifiedBefore.UTC()), maxReviewSideEffectList)

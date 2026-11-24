@@ -246,6 +246,7 @@ func (s *ReviewService) RunStatusJob(ctx context.Context, job *jobs.Job) error {
 		if reviewSideEffectRetryable(err) {
 			return err
 		}
+		s.noteSideEffectFailure(ctx, row.ProjectID, row.MRIID, row.Generation, err)
 		return s.settleStatusVisit(ctx, row, selfHeal, 0, "", reviewSideEffectReason(err))
 	}
 	return s.settleStatusWrite(ctx, ws, row, project.ID, token, noteID, hash, legacy, "", selfHeal)
@@ -367,6 +368,7 @@ func (s *ReviewService) writeTerminalStatusVisit(ctx context.Context, ws *worksp
 		if reviewSideEffectRetryable(err) {
 			return err
 		}
+		s.noteSideEffectFailure(ctx, row.ProjectID, row.MRIID, row.Generation, err)
 		return s.settleStatusVisit(ctx, row, selfHeal, 0, "", reviewSideEffectReason(err))
 	}
 	return s.settleStatusWrite(ctx, ws, row, projectID, token, noteID, hash, legacy, reason, selfHeal)
@@ -396,6 +398,7 @@ func (s *ReviewService) settleStatusWrite(ctx context.Context, ws *workspace.Wor
 		}
 		// A permanent delete failure keeps the legacy note and settles the
 		// receipt path with the bounded reason; note_id is already recorded.
+		s.noteSideEffectFailure(ctx, row.ProjectID, row.MRIID, row.Generation, err)
 		return s.settleStatusVisit(ctx, row, selfHeal, 0, "", reviewSideEffectReason(err))
 	}
 	if selfHeal {
@@ -534,6 +537,7 @@ func (s *ReviewService) RunReactionJob(ctx context.Context, job *jobs.Job) error
 		if reviewSideEffectRetryable(err) {
 			return err
 		}
+		s.noteSideEffectFailure(ctx, row.ProjectID, row.MRIID, row.Generation, err)
 		return s.markReactionApplied(ctx, row, reviewSideEffectReason(err))
 	}
 	return s.markReactionApplied(ctx, row, "")
@@ -564,11 +568,57 @@ func reviewSideEffectRetryable(err error) bool {
 	return true
 }
 
+// reviewSideEffectReason separates the stored reason from the sanitized text.
+// A rejected credential keeps the store's marker prefix so the status row can
+// be reopened once the credential works again; every other terminal failure
+// stays settled (#459).
 func reviewSideEffectReason(err error) string {
 	if err == nil {
 		return ""
 	}
-	return truncateRunes(sanitizeStatusDetail(err.Error()), 300)
+	detail := truncateRunes(sanitizeStatusDetail(err.Error()), 300)
+	if tokenRejected(err) {
+		detail = store.ReviewStatusCredentialError + ": " + truncateRunes(sanitizeStatusDetail(err.Error()), 260)
+	}
+	return detail
+}
+
+// noteSideEffectFailure records a terminal side-effect failure. A rejected
+// credential is logged as a warning and recorded in the credential health
+// snapshot: the row is settled because retrying the same token cannot help,
+// but the rejection must not stay silent, and the console must show which
+// credential is unusable before the next review.
+func (s *ReviewService) noteSideEffectFailure(ctx context.Context, projectID, mrIID, generation int64, err error) {
+	if err == nil || !tokenRejected(err) {
+		return
+	}
+	shared := s.usesSharedCredential(ctx, projectID)
+	status := gitlab.StatusOf(err)
+	if s.logger != nil {
+		s.logger.Warn("gitlab credential rejected during review side effect",
+			"project_id", projectID, "mr_iid", mrIID, "generation", generation,
+			"credential_source", credentialRecordSource(projectID, shared),
+			"http_status", status, "error_class", errclass.Of(err))
+	}
+	if s.credentials != nil {
+		s.credentials.RecordRejection(projectID, shared, tokenRejectedHealthMessage(status, shared))
+	}
+	// The project console health is the durable per-project flag; a shared
+	// rejection is platform-wide and stays out of it.
+	if !shared {
+		s.markProjectTokenRejected(ctx, projectID, status)
+	}
+}
+
+// usesSharedCredential reports whether the project's credential is the
+// instance-wide bot. A project row that cannot be read keeps the project
+// source: the caller still knows which project failed.
+func (s *ReviewService) usesSharedCredential(ctx context.Context, projectID int64) bool {
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil || project == nil {
+		return false
+	}
+	return s.tokens.UsesShared(project)
 }
 
 // settleCancellation records the terminal cancel status and removes the

@@ -324,6 +324,63 @@ type settingsGitLabView struct {
 	// Provisioning credential health is reported as sanitized state only.
 	ProvisioningCredentialState     string     `json:"provisioning_credential_state"`
 	ProvisioningCredentialExpiresAt *time.Time `json:"provisioning_credential_expires_at,omitempty"`
+	// CredentialHealth carries the outcomes observed by runtime calls, so a
+	// rejected credential is visible before the next probe. It holds sanitized
+	// states and counters only.
+	CredentialHealth settingsCredentialHealthView `json:"credential_health"`
+}
+
+// settingsCredentialHealthView is the sanitized credential health snapshot:
+// per-credential states, rejection counters and the last sanitized reason. A
+// token value never appears here.
+type settingsCredentialHealthView struct {
+	Shared   settingsSharedCredentialHealthView    `json:"shared"`
+	Projects []settingsProjectCredentialHealthView `json:"projects,omitempty"`
+}
+
+type settingsSharedCredentialHealthView struct {
+	State         string    `json:"state"`
+	Failures      int64     `json:"failures,omitempty"`
+	LastError     string    `json:"last_error,omitempty"`
+	LastFailureAt time.Time `json:"last_failure_at,omitempty"`
+}
+
+type settingsProjectCredentialHealthView struct {
+	ProjectID      int64      `json:"project_id"`
+	Source         string     `json:"source"`
+	State          string     `json:"state"`
+	Failures       int64      `json:"failures,omitempty"`
+	LastError      string     `json:"last_error,omitempty"`
+	LastFailureAt  time.Time  `json:"last_failure_at,omitempty"`
+	CheckedAt      time.Time  `json:"checked_at"`
+	TokenExpiresAt *time.Time `json:"token_expires_at,omitempty"`
+	ExpiringSoon   bool       `json:"expiring_soon,omitempty"`
+}
+
+// credentialHealthView projects the application snapshot onto the wire view.
+func credentialHealthView(snapshot app.CredentialHealthSnapshot) settingsCredentialHealthView {
+	view := settingsCredentialHealthView{
+		Shared: settingsSharedCredentialHealthView{
+			State:         snapshot.Shared.State,
+			Failures:      snapshot.Shared.Failures,
+			LastError:     snapshot.Shared.LastError,
+			LastFailureAt: snapshot.Shared.LastFailureAt,
+		},
+	}
+	for _, project := range snapshot.Projects {
+		view.Projects = append(view.Projects, settingsProjectCredentialHealthView{
+			ProjectID:      project.ProjectID,
+			Source:         project.Source,
+			State:          project.State,
+			Failures:       project.Failures,
+			LastError:      project.LastError,
+			LastFailureAt:  project.LastFailureAt,
+			CheckedAt:      project.CheckedAt,
+			TokenExpiresAt: project.TokenExpiresAt,
+			ExpiringSoon:   project.ExpiringSoon,
+		})
+	}
+	return view
 }
 
 type settingsAuthView struct {
@@ -439,6 +496,15 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	}); ok {
 		provisioning = provider.ProvisioningCredentialHealth(r.Context())
 	}
+	// The credential health snapshot is process-local state recorded by the
+	// periodic token check and by rejected side-effect writes; it never
+	// contacts GitLab and never carries a token.
+	credentials := settingsCredentialHealthView{}
+	if provider, ok := s.projects.(interface {
+		CredentialHealth() app.CredentialHealthSnapshot
+	}); ok {
+		credentials = credentialHealthView(provider.CredentialHealth())
+	}
 	view := settingsView{
 		Server: settingsServerView{
 			Listen:         cfg.Server.Listen,
@@ -459,6 +525,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			ProvisioningCredential:          cfg.GitLab.ProvisioningTokenEnv != "",
 			ProvisioningCredentialState:     provisioning.State,
 			ProvisioningCredentialExpiresAt: provisioning.ExpiresAt,
+			CredentialHealth:                credentials,
 		},
 		Auth: settingsAuthView{
 			BootstrapAdmins: cfg.Auth.BootstrapAdmins,
