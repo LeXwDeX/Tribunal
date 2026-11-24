@@ -14,6 +14,9 @@ const (
 	reviewMaxFilesHardLimit   = 200
 	reviewDefaultMaxDiffLines = 30000
 	reviewDefaultLanguage     = "zh-CN"
+	// reviewDefaultMaxBackgroundRunes mirrors review.MaxBackgroundRunes; config
+	// cannot import review, so the value is duplicated and kept in sync.
+	reviewDefaultMaxBackgroundRunes = 20000
 )
 
 // normalizeReviewDefaults replaces values that validateReviewDefaultsPolicy
@@ -40,6 +43,10 @@ func normalizeReviewDefaults(cfg *Config) {
 	if defaults.MaxDiffLines <= 0 {
 		defaults.MaxDiffLines = reviewDefaultMaxDiffLines
 		warn("review_defaults.max_diff_lines must be positive; the built-in default was used")
+	}
+	if defaults.MaxBackgroundRunes <= 0 {
+		defaults.MaxBackgroundRunes = reviewDefaultMaxBackgroundRunes
+		warn("review_defaults.max_background_runes must be positive; the built-in default was used")
 	}
 	if strings.TrimSpace(defaults.Language) == "" {
 		defaults.Language = reviewDefaultLanguage

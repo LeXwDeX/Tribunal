@@ -26,6 +26,7 @@ type settingsOverride struct {
 	Ignore               *[]string          `json:"ignore,omitempty"`
 	MaxFiles             *int               `json:"max_files,omitempty"`
 	MaxDiffLines         *int               `json:"max_diff_lines,omitempty"`
+	MaxBackgroundRunes   *int               `json:"max_background_runes,omitempty"`
 	CommitStatus         *bool              `json:"commit_status,omitempty"`
 	PostFailureNote      *bool              `json:"post_failure_note,omitempty"`
 	ShowModelAttribution *bool              `json:"show_model_attribution,omitempty"`
@@ -103,6 +104,9 @@ func ParseSettings(raw json.RawMessage, profiles map[string]config.ProfileConfig
 	}
 	if override.MaxDiffLines != nil && *override.MaxDiffLines <= 0 {
 		details = append(details, Detail{Field: "settings.max_diff_lines", Message: "must be positive"})
+	}
+	if override.MaxBackgroundRunes != nil && *override.MaxBackgroundRunes <= 0 {
+		details = append(details, Detail{Field: "settings.max_background_runes", Message: "must be positive"})
 	}
 	if override.TargetBranches != nil {
 		for i, pattern := range *override.TargetBranches {
@@ -212,6 +216,9 @@ func ResolveSettings(raw json.RawMessage, defaults config.ProjectSettings) (conf
 	}
 	if override.MaxDiffLines != nil {
 		result.MaxDiffLines = *override.MaxDiffLines
+	}
+	if override.MaxBackgroundRunes != nil {
+		result.MaxBackgroundRunes = *override.MaxBackgroundRunes
 	}
 	if override.CommitStatus != nil {
 		result.CommitStatus = *override.CommitStatus

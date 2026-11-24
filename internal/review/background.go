@@ -74,16 +74,20 @@ func projectContextBackground(d *Dossier) string {
 }
 
 // BackgroundBudgetWarning reports which class of background material exceeded
-// MaxBackgroundRunes, so a review can disclose the degradation instead of
-// silently running without repository rules.
-func BackgroundBudgetWarning(d *Dossier) string {
+// maxRunes, so a review can disclose the degradation instead of silently
+// running without repository rules. A non-positive maxRunes falls back to the
+// MaxBackgroundRunes constant.
+func BackgroundBudgetWarning(d *Dossier, maxRunes int) string {
 	if d == nil {
 		return ""
 	}
-	if utf8.RuneCountInString(projectRulesBackground(d)) > MaxBackgroundRunes {
+	if maxRunes <= 0 {
+		maxRunes = MaxBackgroundRunes
+	}
+	if utf8.RuneCountInString(projectRulesBackground(d)) > maxRunes {
 		return backgroundRulesTruncated
 	}
-	if utf8.RuneCountInString(ProjectBackground(d)) > MaxBackgroundRunes {
+	if utf8.RuneCountInString(ProjectBackground(d)) > maxRunes {
 		return backgroundContextTruncated
 	}
 	return ""

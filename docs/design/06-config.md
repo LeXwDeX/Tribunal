@@ -164,6 +164,7 @@ review_defaults:                    # 项目设置的默认值（见 §3）
   ignore: ["**/*.lock", "**/vendor/**", "**/node_modules/**", "**/*.pb.go", "**/*_generated.*", "**/*.min.js"]
   max_files: 200
   max_diff_lines: 30000
+  max_background_runes: 20000
   commit_status: false
   post_failure_note: true
   show_model_attribution: false
@@ -217,11 +218,11 @@ review_defaults:                    # 项目设置的默认值（见 §3）
 
 - `providers.<name>`：`protocol`、`base_url`、`model`、`max_tokens`、`context_window`、`temperature`、`thinking.budget_tokens`、`thinking.type`、`reasoning.effort`、`max_concurrency`、`rpm`、`forced_tool_choice`、`strict_role_alternation`、`preserve_reasoning_content`、`allow_reasoning_effort_none`、`output_config_effort`、`responses_params`、`api_key_env`。`api_key_env` 只允许环境变量名，不写密钥值；允许删除整个 `providers.<name>`，以及删除 `thinking` / `reasoning` 子树。
 - `profiles.default`：`provider`、`explore.provider`、`lanes.code_review.provider`、`lanes.review.provider`、`lanes.reasoner.provider`、`lanes.validate.provider`、`plan.package_tokens`、`plan.max_packages`、`budget.max_nodes`、`budget.max_tokens`、`budget.max_turns`、`budget.deadline`。只允许能被 `NormalizeReviewProfile` 保留的字段；`plan.mode`、`plan.provider`、`reasoner.*`、`consensus`、`challenge.fallback`、`synthesize`、`agent`、`budget.max_extends`、`propose` 等派生或被忽略字段拒绝。
-- `review_defaults`：全部字段，即 `language`、`skip_draft`、`target_branches`、`labels_include`、`labels_exclude`、`ignore`、`max_files`、`max_diff_lines`、`commit_status`、`post_failure_note`、`show_model_attribution`、`allow_repo_config`、`allow_repo_skills`、`profile_by_label`、`custom_rules`。
+- `review_defaults`：全部字段，即 `language`、`skip_draft`、`target_branches`、`labels_include`、`labels_exclude`、`ignore`、`max_files`、`max_diff_lines`、`max_background_runes`、`commit_status`、`post_failure_note`、`show_model_attribution`、`allow_repo_config`、`allow_repo_skills`、`profile_by_label`、`custom_rules`。
 
 永久只读：`price`、`mcp.config`、`storage.dsn`、`secrets.master_key_env`、`auth.bootstrap_token_env`、`auth.oauth.*_env`、`workspace.root`、`workspace.git_bin`、`prompts_dir`、`skills.dirs`、`blocks`、`default_extensions`，以及 `server`、`gitlab`、`jobs`、`engine`、`llm` 等其余全部路径。对未知、敏感或被忽略的路径设置、对非叶子路径设置、类型错误、重复或父子路径冲突，以及空 `changes`，返回 `400 invalid_change`。
 
-写入前用候选 overlay 与全部基础文件做完整 Load + Validate；失败返回 `400 invalid_config`，原文件不变。`review_defaults` 还补充项目设置侧的校验：`max_files` 必须在 1 到 200 之间，`max_diff_lines` 必须为正，`language` 非空，`target_branches` 是合法 glob，`custom_rules`、`ignore` 与 labels 不含空项，`profile_by_label` 只能指向 `default`；这些补充校验只针对本次请求写入的字段，从基础配置继承的非法值在加载时归一，不阻塞其他字段的写入（#540）。overlay 中的 `review_defaults.ignore` 是整体替换内置默认列表，不是追加；只有项目设置中的 `ignore` 才与平台默认值合并（追加）。响应 `review_defaults` 为 `{overlay, effective_ignore, ignore_origin, builtin_ignore}`：`overlay` 是 overlay 文件中的 `review_defaults` 子树原样值（含未展开的 `${ENV}` 占位符），`effective_ignore` 是合并后 `ignore` 列表的原始值（同样不展开），`ignore_origin` 为 `default` / `base` / `overlay`，`builtin_ignore` 是 6 条内置默认，便于控制台展示继承与替换关系；写响应不返回展开后的配置值，避免成为环境变量读取 oracle。
+写入前用候选 overlay 与全部基础文件做完整 Load + Validate；失败返回 `400 invalid_config`，原文件不变。`review_defaults` 还补充项目设置侧的校验：`max_files` 必须在 1 到 200 之间，`max_diff_lines` 必须为正，`max_background_runes` 必须为正，`language` 非空，`target_branches` 是合法 glob，`custom_rules`、`ignore` 与 labels 不含空项，`profile_by_label` 只能指向 `default`；这些补充校验只针对本次请求写入的字段，从基础配置继承的非法值在加载时归一，不阻塞其他字段的写入（#540）。overlay 中的 `review_defaults.ignore` 是整体替换内置默认列表，不是追加；只有项目设置中的 `ignore` 才与平台默认值合并（追加）。响应 `review_defaults` 为 `{overlay, effective_ignore, ignore_origin, builtin_ignore}`：`overlay` 是 overlay 文件中的 `review_defaults` 子树原样值（含未展开的 `${ENV}` 占位符），`effective_ignore` 是合并后 `ignore` 列表的原始值（同样不展开），`ignore_origin` 为 `default` / `base` / `overlay`，`builtin_ignore` 是 6 条内置默认，便于控制台展示继承与替换关系；写响应不返回展开后的配置值，避免成为环境变量读取 oracle。
 
 `base_revision`（各 base 文件 SHA-256 按加载顺序再哈希）和 `overlay_revision`（overlay 文件内容 SHA-256，缺失时为空串）对应 `GET /api/v1/config` 的返回值；写前在锁内重读并校验两者，不一致返回 `409 stale_config`。同一进程内用互斥锁串行化，跨进程使用 `<overlay>.lock` sidecar 的 flock，锁内重新读取文件；锁文件必须是普通文件（符号链接返回 `409 config_symlink`），等待受请求 context 截止时间约束，超时返回 `409 config_busy`。加锁后 best-effort 清理上次中断留下的 `.<overlay>.tmp-*` / `.<overlay>.bak.tmp-*`。落盘使用同目录 `O_EXCL` 临时文件，写入后 fsync、rename 到目标并 fsync 目录；overlay 已存在时，替换前先把当前文件以 `600` 权限备份为 `<overlay>.bak`。失败时原文件字节不变，临时文件被清理。overlay 目录必须存在且对服务进程可写；只读目录、只读挂载、`EROFS` / `EBUSY` 或权限错误返回 `409 config_read_only`，overlay 路径是符号链接返回 `409 config_symlink`，超过 1 MiB 返回 `413 config_too_large`。新建文件权限为 `600`，已有文件沿用原权限。
 
@@ -647,6 +648,7 @@ default_extensions:
   "ignore": ["docs/generated/**"],
   "max_files": 200,
   "max_diff_lines": 8000,
+  "max_background_runes": 20000,
   "commit_status": false,
   "post_failure_note": true,
   "show_model_attribution": false,

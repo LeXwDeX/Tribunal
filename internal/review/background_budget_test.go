@@ -33,21 +33,21 @@ func TestProjectBackgroundKeepsRepositoryRulesBeforeContext(t *testing.T) {
 			t.Fatalf("section %d appears before section %d", i, i-1)
 		}
 	}
-	if BackgroundBudgetWarning(d) != "" {
-		t.Fatalf("small background warned: %q", BackgroundBudgetWarning(d))
+	if BackgroundBudgetWarning(d, 0) != "" {
+		t.Fatalf("small background warned: %q", BackgroundBudgetWarning(d, 0))
 	}
 }
 
 func TestBackgroundBudgetWarningDistinguishesRulesFromContext(t *testing.T) {
 	rules := &Dossier{RepoDocs: RepoDocs{AGENTS: strings.Repeat("a", MaxBackgroundRunes+1)}}
-	if got := BackgroundBudgetWarning(rules); got != backgroundRulesTruncated {
+	if got := BackgroundBudgetWarning(rules, 0); got != backgroundRulesTruncated {
 		t.Fatalf("rules warning = %q", got)
 	}
 	contextOnly := &Dossier{
 		RepoDocs:    RepoDocs{AGENTS: "small rules"},
 		ContextDocs: strings.Repeat("c", MaxBackgroundRunes+1),
 	}
-	if got := BackgroundBudgetWarning(contextOnly); got != backgroundContextTruncated {
+	if got := BackgroundBudgetWarning(contextOnly, 0); got != backgroundContextTruncated {
 		t.Fatalf("context warning = %q", got)
 	}
 }

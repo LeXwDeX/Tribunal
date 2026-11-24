@@ -537,6 +537,7 @@ func (s *ReviewService) recoverWorkflow(ctx context.Context, workflow store.Work
 		Locate:                   locateFunc(index),
 		Outbound:                 outboundSender(ws),
 		RepositorySkillsVerified: execution.repositorySkillsVerified(),
+		MaxBackgroundRunes:       currentConfig.Settings.MaxBackgroundRunes,
 		Logger:                   s.logger,
 	})
 	if err != nil {

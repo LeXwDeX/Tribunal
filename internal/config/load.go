@@ -99,6 +99,7 @@ review_defaults:
     - "**/*.min.js"
   max_files: 200
   max_diff_lines: 30000
+  max_background_runes: 20000
   commit_status: false
   post_failure_note: true
   show_model_attribution: false
