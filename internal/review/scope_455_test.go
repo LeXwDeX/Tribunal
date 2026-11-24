@@ -256,10 +256,10 @@ func TestSynthesisScopeCapsLargeIncrementalFileList(t *testing.T) {
 	}
 }
 
-func TestBuildCodePlanSplitsByHardMaxFiles(t *testing.T) {
+func TestBuildCodePlanSplitsByMaxFilesPerPackage(t *testing.T) {
 	dossier := validDossier(t)
 	dossier.Files = nil
-	total := HardMaxFiles + 1
+	total := MaxFilesPerPackage + 1
 	for i := 0; i < total; i++ {
 		dossier.Files = append(dossier.Files, FileChange{
 			Path: fmt.Sprintf("f%03d.go", i), Status: "modified",
@@ -279,13 +279,93 @@ func TestBuildCodePlanSplitsByHardMaxFiles(t *testing.T) {
 		t.Fatalf("packages = %d, want the file list split across packages", len(plan.Packages))
 	}
 	for _, pkg := range plan.Packages {
-		if len(pkg.Files) > HardMaxFiles {
-			t.Fatalf("package %s has %d files, want at most %d", pkg.ID, len(pkg.Files), HardMaxFiles)
+		if len(pkg.Files) > MaxFilesPerPackage {
+			t.Fatalf("package %s has %d files, want at most %d", pkg.ID, len(pkg.Files), MaxFilesPerPackage)
 		}
 		planned += len(pkg.Files)
 	}
 	if planned != total {
 		t.Fatalf("planned files = %d, want %d", planned, total)
+	}
+}
+
+// A merge request whose file count cannot fit in maxPackages packages must
+// fail with a diagnosable error instead of silently overflowing the last
+// package (which ValidatePlan rejects and degrades the whole review).
+func TestBuildCodePlanOverflowFails(t *testing.T) {
+	dossier := validDossier(t)
+	dossier.Files = nil
+	// 500 files at 200 per package need 3 packages; cap at 2.
+	for i := 0; i < 500; i++ {
+		dossier.Files = append(dossier.Files, FileChange{
+			Path: fmt.Sprintf("f%03d.go", i), Status: "modified",
+			Diff: "@@ -1 +1 @@\n-a\n+b\n", Additions: 1, Deletions: 1,
+		})
+	}
+	_, err := buildCodePlan(planParams{
+		MaxPackages:   2,
+		PackageTokens: 1 << 30,
+		Propose:       []proposeRef{{Block: "code-review", Provider: "local"}},
+	}, dossier)
+	if err == nil {
+		t.Fatal("buildCodePlan overflow must fail, got nil error")
+	}
+	if !strings.Contains(err.Error(), "needs more than 2 packages") {
+		t.Fatalf("error = %v, want a diagnosable overflow message", err)
+	}
+}
+
+// A large merge request (more files than the old 200 cap) is planned in full
+// when max_files is raised: packages are bounded by the token budget, each
+// package stays within MaxFilesPerPackage, and the plan validates.
+func TestBuildCodePlanLargeMRFullCoverage(t *testing.T) {
+	dossier := validDossier(t)
+	dossier.Files = nil
+	const fileCount = 250
+	const packageTokens = 60000
+	// Each file's diff is sized so estimateFileTokens == 1200, so 50 files
+	// fill one 60000-token package and 250 files need exactly 5 packages.
+	diff := "@@ -1 +1 @@\n" + strings.Repeat("a", 3988)
+	for i := 0; i < fileCount; i++ {
+		dossier.Files = append(dossier.Files, FileChange{
+			Path: fmt.Sprintf("f%03d.go", i), Status: "modified",
+			Diff: diff, Additions: 1, Deletions: 1,
+		})
+	}
+	plan, err := buildCodePlan(planParams{
+		MaxPackages:   12,
+		PackageTokens: packageTokens,
+		Propose:       []proposeRef{{Block: "code-review", Provider: "local"}},
+	}, dossier)
+	if err != nil {
+		t.Fatalf("buildCodePlan: %v", err)
+	}
+	totalTokens := 0
+	for _, f := range dossier.Files {
+		totalTokens += estimateFileTokens(f)
+	}
+	wantPackages := (totalTokens + packageTokens - 1) / packageTokens
+	if len(plan.Packages) != wantPackages {
+		t.Fatalf("packages = %d, want ceil(tokens/%d) = %d", len(plan.Packages), packageTokens, wantPackages)
+	}
+	planned := 0
+	for _, pkg := range plan.Packages {
+		if len(pkg.Files) > MaxFilesPerPackage {
+			t.Fatalf("package %s has %d files, want at most %d", pkg.ID, len(pkg.Files), MaxFilesPerPackage)
+		}
+		planned += len(pkg.Files)
+	}
+	if planned != fileCount {
+		t.Fatalf("planned files = %d, want %d", planned, fileCount)
+	}
+	policy := PlanPolicy{
+		AllowedBlocks:      []string{"code-review"},
+		ChangedFiles:       dossierPaths(dossier),
+		MaxPackages:        12,
+		MaxFilesPerPackage: MaxFilesPerPackage,
+	}
+	if err := plan.ValidatePolicy(policy); err != nil {
+		t.Fatalf("large-MR plan must validate: %v", err)
 	}
 }
 

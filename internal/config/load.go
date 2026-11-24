@@ -69,7 +69,7 @@ profiles:
     plan:
       package_tokens: 60000
     budget:
-      max_nodes: 30
+      max_nodes: 60
       # 0: no workflow deadline (#451).
       deadline: 0s
       # 0: no per-node model request cap (#451).
@@ -117,7 +117,7 @@ on_uncertain: mark
 synthesize:
   mode: code
 budget:
-  max_nodes: 30
+  max_nodes: 60
   max_extends: 0
   # 0: no workflow deadline (#451).
   deadline: 0s

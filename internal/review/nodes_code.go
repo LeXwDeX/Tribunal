@@ -964,7 +964,7 @@ func (e *Executor) executePlanCode(ctx context.Context, in dag.NodeInput) (dag.N
 		AllowedProviders:   planAllowedProviders(params.Propose),
 		ChangedFiles:       dossierPaths(e.deps.Dossier),
 		MaxPackages:        params.MaxPackages,
-		MaxFilesPerPackage: DefaultMaxFiles,
+		MaxFilesPerPackage: MaxFilesPerPackage,
 		AllowReasoner:      params.AllowReasoner,
 	}
 	if err := ValidatePlan(plan, policy); err != nil {
@@ -1009,14 +1009,16 @@ func buildCodePlan(params planParams, dossier *Dossier) (PlanOut, error) {
 			buckets = append(buckets, bucket{dirs: map[string]struct{}{}})
 		}
 		current := &buckets[len(buckets)-1]
-		// Split on both dimensions: a package may not exceed the hard file
-		// limit even when its diffs are small, and the token budget still
-		// bounds prompt size.
-		if len(current.files) >= HardMaxFiles && len(buckets) < maxPackages {
-			buckets = append(buckets, bucket{dirs: map[string]struct{}{}})
-			current = &buckets[len(buckets)-1]
-		}
-		if current.tokens > 0 && current.tokens+tokens > packageTokens && len(buckets) < maxPackages {
+		// Split on both dimensions: a package may not exceed the per-package
+		// file limit even when its diffs are small, and the token budget still
+		// bounds prompt size. When no bucket is available and the current one
+		// is already full, fail with a diagnosable error instead of silently
+		// overflowing a package (which ValidatePlan would reject and degrade
+		// the whole review).
+		if len(current.files) >= MaxFilesPerPackage || (current.tokens > 0 && current.tokens+tokens > packageTokens) {
+			if len(buckets) >= maxPackages {
+				return PlanOut{}, fmt.Errorf("review: plan needs more than %d packages for %d changed files", maxPackages, len(files))
+			}
 			buckets = append(buckets, bucket{dirs: map[string]struct{}{}})
 			current = &buckets[len(buckets)-1]
 		}

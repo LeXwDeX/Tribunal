@@ -84,8 +84,20 @@ const (
 	DefaultMaxPackages = 6
 	HardMaxPackages    = 100
 	DefaultMaxFiles    = 200
-	HardMaxFiles       = 200
-	HardMaxExtends     = 2
+	// MaxFilesPerPackage bounds a single package; it is the per-package limit
+	// enforced by Package.Validate and the buildCodePlan split threshold.
+	MaxFilesPerPackage = 200
+	// HardMaxFiles is the ceiling for a project's configured max_files. It is
+	// not a per-package bound; raising it lets large merge requests be reviewed
+	// in full instead of being truncated at the old 200-file cap.
+	HardMaxFiles = 1000
+	// MaxListedFiles bounds how many changed files the plan prompt lists. It is
+	// a display budget, not a review-coverage limit; files beyond it are omitted
+	// from the prompt and surfaced as a coverage signal.
+	MaxListedFiles = 2000
+	// HardMaxDiffLines is the ceiling for a project's configured max_diff_lines.
+	HardMaxDiffLines = 300000
+	HardMaxExtends   = 2
 )
 
 // ValidationError identifies the failing contract field.
@@ -470,8 +482,8 @@ func (p Package) Validate() error {
 	if p.Files == nil {
 		return invalid("files", "is required (use [] only if intentionally empty)")
 	}
-	if len(p.Files) == 0 || len(p.Files) > HardMaxFiles {
-		return invalid("files", "must contain 1 to %d entries", HardMaxFiles)
+	if len(p.Files) == 0 || len(p.Files) > MaxFilesPerPackage {
+		return invalid("files", "must contain 1 to %d entries", MaxFilesPerPackage)
 	}
 	seenFiles := make(map[string]struct{}, len(p.Files))
 	for i, file := range p.Files {
@@ -555,8 +567,8 @@ func (p PlanOut) ValidatePolicy(policy PlanPolicy) error {
 	if policy.MaxPackages < 0 || policy.MaxPackages > HardMaxPackages {
 		return invalid("max_packages", "must be between 0 and %d", HardMaxPackages)
 	}
-	if policy.MaxFilesPerPackage < 0 || policy.MaxFilesPerPackage > HardMaxFiles {
-		return invalid("max_files_per_package", "must be between 0 and %d", HardMaxFiles)
+	if policy.MaxFilesPerPackage < 0 || policy.MaxFilesPerPackage > MaxFilesPerPackage {
+		return invalid("max_files_per_package", "must be between 0 and %d", MaxFilesPerPackage)
 	}
 	maxPackages := policy.MaxPackages
 	if maxPackages == 0 {

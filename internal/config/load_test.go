@@ -53,7 +53,7 @@ func TestLoadDefaults(t *testing.T) {
 	if profile.Plan.Mode != "code" || profile.Synthesize.Mode != "code" || profile.OnUncertain != "mark" {
 		t.Errorf("default profile = %+v", profile)
 	}
-	if profile.Budget.MaxNodes != 30 || profile.Budget.MaxExtends != 0 ||
+	if profile.Budget.MaxNodes != 60 || profile.Budget.MaxExtends != 0 ||
 		profile.Budget.Deadline != 0 || profile.Budget.MaxTokens != 0 ||
 		profile.Budget.MaxTurns != 0 {
 		t.Errorf("default budget = %+v", profile.Budget)
@@ -130,7 +130,7 @@ profiles:
 		t.Errorf("arrays must replace, got %v", got)
 	}
 	defaultProfile := cfg.Profiles["default"]
-	if defaultProfile.Plan.PackageTokens != 123 || defaultProfile.Budget.MaxNodes != 30 || defaultProfile.Budget.Deadline != 0 {
+	if defaultProfile.Plan.PackageTokens != 123 || defaultProfile.Budget.MaxNodes != 60 || defaultProfile.Budget.Deadline != 0 {
 		t.Errorf("default profile lost merged values or defaults: %+v", defaultProfile)
 	}
 	if lanes := defaultProfile.Lanes; lanes == nil || lanes.Review.Provider != "base-review" || lanes.Reasoner.Provider != "override-reasoner" {

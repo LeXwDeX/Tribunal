@@ -80,9 +80,9 @@ func TestNormalizeReviewProfileBoundsPackagesAndWarnsOnShortDeadline(t *testing.
 	}{
 		{name: "fits", plan: PlanConfig{MaxPackages: 6}, budget: BudgetConfig{MaxNodes: 30, Deadline: 30 * time.Minute}, want: 6},
 		{name: "max_nodes bound", plan: PlanConfig{MaxPackages: 17}, budget: BudgetConfig{MaxNodes: 30}, want: 10, warnings: []string{"plan.max_packages 17 was lowered to 10"}},
-		{name: "fan-out bound", plan: PlanConfig{MaxPackages: 30}, budget: BudgetConfig{MaxNodes: 100}, want: 17, warnings: []string{"plan.max_packages 30 was lowered to 17"}},
+		{name: "fan-out bound", plan: PlanConfig{MaxPackages: 40}, budget: BudgetConfig{MaxNodes: 100}, want: 30, warnings: []string{"plan.max_packages 40 was lowered to 30"}},
 		{name: "unset default shrinks quietly", budget: BudgetConfig{MaxNodes: 15}, want: 3},
-		{name: "unset default stays unset", budget: BudgetConfig{MaxNodes: 30}, want: 0},
+		{name: "unset default stays unset", budget: BudgetConfig{MaxNodes: 60}, want: 0},
 		{name: "short deadline", plan: PlanConfig{MaxPackages: 6}, budget: BudgetConfig{MaxNodes: 30, Deadline: 20 * time.Minute}, want: 6, warnings: []string{"budget.deadline 20m0s is below 30m0s"}},
 	}
 	for _, tc := range cases {

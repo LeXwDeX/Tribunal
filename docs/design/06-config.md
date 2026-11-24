@@ -162,8 +162,8 @@ review_defaults:                    # 项目设置的默认值（见 §3）
   language: zh-CN
   skip_draft: true
   ignore: ["**/*.lock", "**/vendor/**", "**/node_modules/**", "**/*.pb.go", "**/*_generated.*", "**/*.min.js"]
-  max_files: 200
-  max_diff_lines: 30000
+  max_files: 200            # 默认 200，可覆盖到 1000（覆盖优先，大 MR 不被截断）
+  max_diff_lines: 30000     # 上限 300000
   max_background_runes: 20000
   commit_status: false
   post_failure_note: true
@@ -191,7 +191,7 @@ review_defaults:                    # 项目设置的默认值（见 §3）
 
 ### 配置来源快照、overlay 与热刷新
 
-文件加载顺序为**内置默认 < `--config`（可重复，按顺序）< overlay**。新增启动参数 `--overlay`，默认 `/app/data/config-overlay/server.overlay.yaml`；传 `--overlay ""` 关闭 overlay，传其他路径可改用自定义文件。`--config` 文件仍是必需文件，缺失仍启动失败。overlay 文件不存在等价空文档，属正常状态；overlay 存在但 YAML 非法、含未知字段、重复键或类型错误时启动失败，错误信息带源文件名（overlay 路径）。`--check-config` 同样会读取并校验 overlay。加载时（启动、`--check-config` 与 watcher 重载）会把不可用的 `review_defaults` 策略归一为内置默认并记 WARNING，不拒绝启动：`max_files` / `max_diff_lines` 非正数、`max_files` 超过 200（钳制为 200）、空 `language`、空或非法 `target_branches` glob、空列表项、指向未知评审档位的 `profile_by_label`。启动与 `--check-config` 直接记录 WARNING；watcher 重载只对新增的归一 warning 记录 WARNING，启动快照已有的 warning 不重复。非法 `target_branches` 项被丢弃；全部丢弃后按空列表处理，即只评审项目默认分支（#540）。不传 `--overlay`（使用默认路径且文件不存在）时，最终配置与之前一致。
+文件加载顺序为**内置默认 < `--config`（可重复，按顺序）< overlay**。新增启动参数 `--overlay`，默认 `/app/data/config-overlay/server.overlay.yaml`；传 `--overlay ""` 关闭 overlay，传其他路径可改用自定义文件。`--config` 文件仍是必需文件，缺失仍启动失败。overlay 文件不存在等价空文档，属正常状态；overlay 存在但 YAML 非法、含未知字段、重复键或类型错误时启动失败，错误信息带源文件名（overlay 路径）。`--check-config` 同样会读取并校验 overlay。加载时（启动、`--check-config` 与 watcher 重载）会把不可用的 `review_defaults` 策略归一为内置默认并记 WARNING，不拒绝启动：`max_files` / `max_diff_lines` 非正数、`max_files` 超过 1000（钳制为 1000）、空 `language`、空或非法 `target_branches` glob、空列表项、指向未知评审档位的 `profile_by_label`。启动与 `--check-config` 直接记录 WARNING；watcher 重载只对新增的归一 warning 记录 WARNING，启动快照已有的 warning 不重复。非法 `target_branches` 项被丢弃；全部丢弃后按空列表处理，即只评审项目默认分支（#540）。不传 `--overlay`（使用默认路径且文件不存在）时，最终配置与之前一致。
 
 `internal/config` 新增 `Source` 和 `Snapshot`，用于描述文件来源与合并结果：
 
@@ -222,7 +222,7 @@ review_defaults:                    # 项目设置的默认值（见 §3）
 
 永久只读：`price`、`mcp.config`、`storage.dsn`、`secrets.master_key_env`、`auth.bootstrap_token_env`、`auth.oauth.*_env`、`workspace.root`、`workspace.git_bin`、`prompts_dir`、`skills.dirs`、`blocks`、`default_extensions`，以及 `server`、`gitlab`、`jobs`、`engine`、`llm` 等其余全部路径。对未知、敏感或被忽略的路径设置、对非叶子路径设置、类型错误、重复或父子路径冲突，以及空 `changes`，返回 `400 invalid_change`。
 
-写入前用候选 overlay 与全部基础文件做完整 Load + Validate；失败返回 `400 invalid_config`，原文件不变。`review_defaults` 还补充项目设置侧的校验：`max_files` 必须在 1 到 200 之间，`max_diff_lines` 必须为正，`max_background_runes` 必须为正，`language` 非空，`target_branches` 是合法 glob，`custom_rules`、`ignore` 与 labels 不含空项，`profile_by_label` 只能指向 `default`；这些补充校验只针对本次请求写入的字段，从基础配置继承的非法值在加载时归一，不阻塞其他字段的写入（#540）。overlay 中的 `review_defaults.ignore` 是整体替换内置默认列表，不是追加；只有项目设置中的 `ignore` 才与平台默认值合并（追加）。响应 `review_defaults` 为 `{overlay, effective_ignore, ignore_origin, builtin_ignore}`：`overlay` 是 overlay 文件中的 `review_defaults` 子树原样值（含未展开的 `${ENV}` 占位符），`effective_ignore` 是合并后 `ignore` 列表的原始值（同样不展开），`ignore_origin` 为 `default` / `base` / `overlay`，`builtin_ignore` 是 6 条内置默认，便于控制台展示继承与替换关系；写响应不返回展开后的配置值，避免成为环境变量读取 oracle。
+写入前用候选 overlay 与全部基础文件做完整 Load + Validate；失败返回 `400 invalid_config`，原文件不变。`review_defaults` 还补充项目设置侧的校验：`max_files` 必须在 1 到 1000 之间，`max_diff_lines` 必须在 1 到 300000 之间，`max_background_runes` 必须为正，`language` 非空，`target_branches` 是合法 glob，`custom_rules`、`ignore` 与 labels 不含空项，`profile_by_label` 只能指向 `default`；这些补充校验只针对本次请求写入的字段，从基础配置继承的非法值在加载时归一，不阻塞其他字段的写入（#540）。overlay 中的 `review_defaults.ignore` 是整体替换内置默认列表，不是追加；只有项目设置中的 `ignore` 才与平台默认值合并（追加）。响应 `review_defaults` 为 `{overlay, effective_ignore, ignore_origin, builtin_ignore}`：`overlay` 是 overlay 文件中的 `review_defaults` 子树原样值（含未展开的 `${ENV}` 占位符），`effective_ignore` 是合并后 `ignore` 列表的原始值（同样不展开），`ignore_origin` 为 `default` / `base` / `overlay`，`builtin_ignore` 是 6 条内置默认，便于控制台展示继承与替换关系；写响应不返回展开后的配置值，避免成为环境变量读取 oracle。
 
 `base_revision`（各 base 文件 SHA-256 按加载顺序再哈希）和 `overlay_revision`（overlay 文件内容 SHA-256，缺失时为空串）对应 `GET /api/v1/config` 的返回值；写前在锁内重读并校验两者，不一致返回 `409 stale_config`。同一进程内用互斥锁串行化，跨进程使用 `<overlay>.lock` sidecar 的 flock，锁内重新读取文件；锁文件必须是普通文件（符号链接返回 `409 config_symlink`），等待受请求 context 截止时间约束，超时返回 `409 config_busy`。加锁后 best-effort 清理上次中断留下的 `.<overlay>.tmp-*` / `.<overlay>.bak.tmp-*`。落盘使用同目录 `O_EXCL` 临时文件，写入后 fsync、rename 到目标并 fsync 目录；overlay 已存在时，替换前先把当前文件以 `600` 权限备份为 `<overlay>.bak`。失败时原文件字节不变，临时文件被清理。overlay 目录必须存在且对服务进程可写；只读目录、只读挂载、`EROFS` / `EBUSY` 或权限错误返回 `409 config_read_only`，overlay 路径是符号链接返回 `409 config_symlink`，超过 1 MiB 返回 `413 config_too_large`。新建文件权限为 `600`，已有文件沿用原权限。
 
@@ -359,13 +359,13 @@ Tribunal 只有一个评审档位 `default`，评审图固定：`explore` → �
 | `lanes.code_review.provider`、`lanes.review.provider`、`lanes.reasoner.provider`、`lanes.validate.provider` | 可选，分别覆盖四路评审；留空取 `provider` |
 | `challenge.provider` | 可选，覆盖逐条反证（`verify`）；留空取 `provider` |
 | `plan.package_tokens`、`plan.max_packages` | 分包上限：每包估算 token（默认 60000）和最大包数（默认 6，受下述上界限制） |
-| `budget.max_nodes`、`budget.deadline`、`budget.max_tokens`、`budget.max_turns` | 节点总数（默认 30）、工作流总时长（默认 0s，不设 deadline；负值拒绝）、token 上限（默认 0，即不设上限，用量由上游 LLM key 的额度决定；填正数才启用工作流 token 预算，见 [#392](https://github.com/LeXwDeX/Tribunal/issues/392)）、每个 agent 节点的模型请求数上限（默认 0，不限制；负值拒绝，填正数才设上限） |
+| `budget.max_nodes`、`budget.deadline`、`budget.max_tokens`、`budget.max_turns` | 节点总数（默认 60）、工作流总时长（默认 0s，不设 deadline；负值拒绝）、token 上限（默认 0，即不设上限，用量由上游 LLM key 的额度决定；填正数才启用工作流 token 预算，见 [#392](https://github.com/LeXwDeX/Tribunal/issues/392)）、每个 agent 节点的模型请求数上限（默认 0，不限制；负值拒绝，填正数才设上限） |
 
 其余行为由代码固定，不可配置：plan 为 code 模式（不调用模型），P0/P1 逐条挑战，挑战结果不确定的条目标记为「存疑」后发布，报告由代码生成，评审图不在汇报阶段扩展。
 
-`Load` 会把 `plan.max_packages` 降到上界 `min(17, (budget.max_nodes − 9) / 2)`（至少 1）：配置值高于上界时降到上界，并在启动日志产生一行 WARN；未配置且上界低于默认值 6 时静默降到上界。`budget.deadline` 为 0（默认）表示不设工作流 deadline，不产生告警；只有显式正数且低于 30m 时启动日志才提示（探索、四路评审和逐条反证可能来不及完成）。`budget.max_turns` 为 0 表示每个 agent 节点不限制模型请求数；正数到达后仍未提交 `submit_result` 的节点失败。评审 agent 节点默认也不设节点级 deadline（`DefaultReviewTimeout = -1`），需要限制时显式配置 `deadline` 或 `max_turns`。`budget` 下的字段都参与评审档位哈希，修改后重启恢复可能使未终态评审以 `profile_hash_changed` 取消。
+`Load` 会把 `plan.max_packages` 降到上界 `min(30, (budget.max_nodes − 9) / 2)`（至少 1）：配置值高于上界时降到上界，并在启动日志产生一行 WARN；未配置且上界低于默认值 12 时静默降到上界。`budget.deadline` 为 0（默认）表示不设工作流 deadline，不产生告警；只有显式正数且低于 30m 时启动日志才提示（探索、四路评审和逐条反证可能来不及完成）。`budget.max_turns` 为 0 表示每个 agent 节点不限制模型请求数；正数到达后仍未提交 `submit_result` 的节点失败。评审 agent 节点默认也不设节点级 deadline（`DefaultReviewTimeout = -1`），需要限制时显式配置 `deadline` 或 `max_turns`。`budget` 下的字段都参与评审档位哈希，修改后重启恢复可能使未终态评审以 `profile_hash_changed` 取消。
 
-评审执行时（构建评审图）还会检查扇出上限：`plan.max_packages × 2 + 2 ≤ max_fan_out`（`max_fan_out` 默认 36），超出时拒绝该配置。每个包生成 `code-review` 和 `review` 各一个节点，`reasoner` 和 `validate` 每个 MR 各一个。
+评审执行时（构建评审图）还会检查扇出上限：`plan.max_packages × 2 + 2 ≤ max_fan_out`（`max_fan_out` 默认 62），超出时拒绝该配置。每个包生成 `code-review` 和 `review` 各一个节点，`reasoner` 和 `validate` 每个 MR 各一个。
 
 #### 档位覆盖：节点模型与参数
 
