@@ -43,6 +43,12 @@ storage:
 
 workspace:
   root: /app/data/workspaces
+  # Capacity guard: measure the workspace root, report it through
+  # GET /api/v1/stats (workspace_capacity) and WARN over the limit.
+  max_bytes: 53687091200
+  # Idle-workspace reclamation: remove an inactive project workspace after this
+  # long. A reclaimed workspace is rebuilt on the next review or onboarding.
+  reclaim_after: 2160h
 
 secrets:
   master_key_env: REVIEW_MASTER_KEY
