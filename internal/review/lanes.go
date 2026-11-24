@@ -972,7 +972,7 @@ func writeChangedFiles(b *strings.Builder, d *Dossier) {
 		return
 	}
 	for i, file := range d.Files {
-		if i >= MaxFindings {
+		if i >= MaxListedFiles {
 			b.WriteString("- （其余文件已省略）\n")
 			break
 		}

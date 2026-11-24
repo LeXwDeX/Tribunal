@@ -63,7 +63,7 @@ func (e *Executor) executePlanAgent(ctx context.Context, in dag.NodeInput, param
 		AllowedProviders:   planAllowedProviders(params.Propose),
 		ChangedFiles:       dossierPaths(e.deps.Dossier),
 		MaxPackages:        params.MaxPackages,
-		MaxFilesPerPackage: DefaultMaxFiles,
+		MaxFilesPerPackage: MaxFilesPerPackage,
 		AllowReasoner:      params.AllowReasoner,
 	}
 	schema, err := ContractSchema(ContractPlan)
@@ -1360,7 +1360,7 @@ func planTask(d *Dossier, params planParams) string {
 	b.WriteString("\n## 变更文件\n\n")
 	if d != nil {
 		for i, file := range d.Files {
-			if i >= MaxFindings {
+			if i >= MaxListedFiles {
 				b.WriteString("- （其余文件已省略）\n")
 				break
 			}
@@ -1373,7 +1373,7 @@ func planTask(d *Dossier, params planParams) string {
 	}
 	b.WriteString("\n## 评审包约束\n\n")
 	b.WriteString(fmt.Sprintf("- 允许的 block：%s\n", strings.Join(planAllowedBlocks(params.Propose), ", ")))
-	b.WriteString(fmt.Sprintf("- 最多 %d 个包；单包最多 %d 个文件。\n", params.MaxPackages, DefaultMaxFiles))
+	b.WriteString(fmt.Sprintf("- 最多 %d 个包；单包最多 %d 个文件。\n", params.MaxPackages, MaxFilesPerPackage))
 	blocks := planAllowedBlocks(params.Propose)
 	if len(blocks) > 0 {
 		b.WriteString(fmt.Sprintf("- 每个包的 blocks 必须来自允许列表：%s。\n", strings.Join(blocks, ", ")))

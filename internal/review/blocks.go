@@ -81,7 +81,7 @@ const (
 	DefaultAdjudicateTimeout = 2 * time.Minute
 	DefaultSynthesizeTimeout = 10 * time.Minute
 	DefaultOnboardingTimeout = 15 * time.Minute
-	DefaultMaxFanOut         = 36
+	DefaultMaxFanOut         = 62
 	DefaultPackageTokens     = 60000
 )
 
@@ -459,7 +459,7 @@ func ValidateProfile(profile Profile) (Profile, error) {
 	}
 
 	if cfg.Budget.MaxNodes == 0 {
-		cfg.Budget.MaxNodes = 30
+		cfg.Budget.MaxNodes = 60
 	}
 	if cfg.Budget.MaxNodes < 0 || cfg.Budget.MaxNodes > 100 {
 		return Profile{}, &ProfileError{Field: "budget.max_nodes", Problem: "must be between 1 and 100"}
@@ -609,7 +609,7 @@ func graphBudget(in config.BudgetConfig) dag.Budget {
 		MaxTokens:  in.MaxTokens,
 	}
 	if budget.MaxNodes == 0 {
-		budget.MaxNodes = 30
+		budget.MaxNodes = 60
 	}
 	// A zero deadline stays zero: the workflow has no deadline (#451).
 	return budget
@@ -1056,7 +1056,7 @@ func (p PlanExpander) Expand(ctx context.Context, wf dag.WorkflowView, from dag.
 		AllowedProviders:   planAllowedProviders(params.Propose),
 		ChangedFiles:       dossierPaths(p.Dossier),
 		MaxPackages:        params.MaxPackages,
-		MaxFilesPerPackage: DefaultMaxFiles,
+		MaxFilesPerPackage: MaxFilesPerPackage,
 		AllowReasoner:      params.AllowReasoner,
 	}
 	if err := ValidatePlan(*plan, policy); err != nil {

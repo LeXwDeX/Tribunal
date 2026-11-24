@@ -178,7 +178,7 @@ func TestExplicitEmptyRequiredArraysAreAccepted(t *testing.T) {
 }
 
 func TestPackageHardBounds(t *testing.T) {
-	pkg := Package{ID: "p1", Blocks: []string{"code-review"}, Files: make([]string, HardMaxFiles+1), Focus: "x"}
+	pkg := Package{ID: "p1", Blocks: []string{"code-review"}, Files: make([]string, MaxFilesPerPackage+1), Focus: "x"}
 	for i := range pkg.Files {
 		pkg.Files[i] = "f" + string(rune('a'+i%26)) + ".go"
 	}

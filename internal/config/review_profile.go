@@ -21,12 +21,12 @@ const (
 
 	// reviewMaxFanOut mirrors the graph's default max_fan_out; each package
 	// adds a code-review and a review lane, the MR adds reasoner and validate.
-	reviewMaxFanOut = 36
+	reviewMaxFanOut = 62
 	// reviewFixedNodes counts explore, plan, reasoner, validate, gather,
 	// adjudicate and synthesize, plus room for two verify challenges.
 	reviewFixedNodes   = 9
-	defaultMaxNodes    = 30
-	defaultMaxPackages = 6
+	defaultMaxNodes    = 60
+	defaultMaxPackages = 12
 	recommendedTimeout = 30 * time.Minute
 )
 

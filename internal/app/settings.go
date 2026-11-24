@@ -105,6 +105,12 @@ func ParseSettings(raw json.RawMessage, profiles map[string]config.ProfileConfig
 	if override.MaxDiffLines != nil && *override.MaxDiffLines <= 0 {
 		details = append(details, Detail{Field: "settings.max_diff_lines", Message: "must be positive"})
 	}
+	if override.MaxDiffLines != nil && *override.MaxDiffLines > review.HardMaxDiffLines {
+		details = append(details, Detail{
+			Field:   "settings.max_diff_lines",
+			Message: fmt.Sprintf("must be at most %d", review.HardMaxDiffLines),
+		})
+	}
 	if override.MaxBackgroundRunes != nil && *override.MaxBackgroundRunes <= 0 {
 		details = append(details, Detail{Field: "settings.max_background_runes", Message: "must be positive"})
 	}

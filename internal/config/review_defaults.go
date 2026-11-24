@@ -11,7 +11,7 @@ import (
 // and review.HardMaxFiles; keep them in sync.
 const (
 	reviewDefaultMaxFiles     = 200
-	reviewMaxFilesHardLimit   = 200
+	reviewMaxFilesHardLimit   = 1000
 	reviewDefaultMaxDiffLines = 30000
 	reviewDefaultLanguage     = "zh-CN"
 	// reviewDefaultMaxBackgroundRunes mirrors review.MaxBackgroundRunes; config

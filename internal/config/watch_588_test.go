@@ -15,12 +15,12 @@ func TestWatcherReloadLogsNewNormalizationWarnings(t *testing.T) {
 	harness := newWatcherHarnessWithLogger(t, watcherBase+"server:\n  listen: \":8080\"\n", "", logger)
 	harness.watcher.poll()
 
-	harness.rewrite(t, harness.overlay, "review_defaults:\n  max_files: 300\n")
+	harness.rewrite(t, harness.overlay, "review_defaults:\n  max_files: 2000\n")
 	harness.watcher.poll()
 	harness.watcher.poll()
 	state := harness.requireState(t)
-	if got := state.Snapshot.Config.ReviewDefaults.MaxFiles; got != 200 {
-		t.Fatalf("reloaded max_files = %d, want 200", got)
+	if got := state.Snapshot.Config.ReviewDefaults.MaxFiles; got != 1000 {
+		t.Fatalf("reloaded max_files = %d, want 1000", got)
 	}
 	output := logs.String()
 	if !strings.Contains(output, "level=WARN") || !strings.Contains(output, "review_defaults.max_files") {
@@ -33,7 +33,7 @@ func TestWatcherReloadLogsNewNormalizationWarnings(t *testing.T) {
 func TestWatcherReloadDoesNotRepeatStartupWarnings(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
-	base := watcherBase + "review_defaults:\n  max_files: 300\n"
+	base := watcherBase + "review_defaults:\n  max_files: 2000\n"
 	harness := newWatcherHarnessWithLogger(t, base, "", logger)
 	harness.watcher.poll()
 

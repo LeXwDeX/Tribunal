@@ -33,13 +33,13 @@ func (e *Executor) coverageUnresolved(wf dag.WorkflowView) ([]UnresolvedSignal, 
 	if warning := contentFreeWarning(d); warning != "" {
 		warnings = append(warnings, warning)
 	}
-	if len(d.Files) > MaxFindings {
+	if len(d.Files) > MaxListedFiles {
 		signals = append(signals, UnresolvedSignal{
 			Node: "plan",
 			Kind: UnresolvedEvidence,
 			Message: fmt.Sprintf(
 				"plan prompt lists at most %d files; %d changed files were omitted before planning",
-				MaxFindings, len(d.Files)-MaxFindings),
+				MaxListedFiles, len(d.Files)-MaxListedFiles),
 		})
 	}
 	for _, id := range wf.Order {
