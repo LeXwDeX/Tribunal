@@ -82,7 +82,7 @@ const (
 	DefaultSynthesizeTimeout = 10 * time.Minute
 	DefaultOnboardingTimeout = 15 * time.Minute
 	DefaultMaxFanOut         = 62
-	DefaultPackageTokens     = 60000
+	DefaultPackageTokens     = 100000
 )
 
 // ErrInvalidProfile reports a profile or graph-policy violation.

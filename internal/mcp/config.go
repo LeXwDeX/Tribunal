@@ -31,7 +31,7 @@ const (
 	// DefaultIdleTimeout closes an idle server after ten minutes.
 	DefaultIdleTimeout = 10 * time.Minute
 	// DefaultMaxOutputChars bounds one tool result in characters.
-	DefaultMaxOutputChars = 20000
+	DefaultMaxOutputChars = 200000
 	// MaxOutputChars is the largest accepted per-call output limit.
 	MaxOutputChars = 1 << 20
 

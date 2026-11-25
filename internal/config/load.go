@@ -69,7 +69,7 @@ profiles:
     plan:
       package_tokens: 60000
     budget:
-      max_nodes: 60
+      max_nodes: 100
       # 0: no workflow deadline (#451).
       deadline: 0s
       # 0: no per-node model request cap (#451).
@@ -97,9 +97,9 @@ review_defaults:
     - "**/*.pb.go"
     - "**/*_generated.*"
     - "**/*.min.js"
-  max_files: 200
-  max_diff_lines: 30000
-  max_background_runes: 20000
+  max_files: 1000
+  max_diff_lines: 300000
+  max_background_runes: 100000
   commit_status: false
   post_failure_note: true
   show_model_attribution: false

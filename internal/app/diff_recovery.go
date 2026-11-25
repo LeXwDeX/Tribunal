@@ -17,7 +17,7 @@ const (
 	// body GitLab withheld as too_large, while still capping memory.
 	maxRecoveredRawFileBytes = int64(gitlab.MaxRecoveryFileBytes)
 	// maxRecoveredReviewBytes bounds the total recovered bodies per review.
-	maxRecoveredReviewBytes = 8 << 20
+	maxRecoveredReviewBytes = 32 << 20
 	// maxRecoveredFiles bounds the number of recovery attempts per review,
 	// successful or not, so withheld bodies cannot trigger one request each.
 	maxRecoveredFiles = 20
@@ -25,7 +25,7 @@ const (
 	maxRecoveredDiffBytes = 4 << 20
 	// maxRecoveredFetchBytes bounds the total raw bytes read for recovery in one
 	// review, so a stream of withheld files cannot fetch an unbounded volume.
-	maxRecoveredFetchBytes = 32 << 20
+	maxRecoveredFetchBytes = 64 << 20
 	// maxResourceLineBytes bounds the longest single line in a recovered body.
 	// A longer line is treated as a non-diffable resource (an embedded blob, a
 	// base64 image) rather than review content.

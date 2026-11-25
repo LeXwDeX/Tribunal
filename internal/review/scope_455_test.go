@@ -295,8 +295,8 @@ func TestBuildCodePlanSplitsByMaxFilesPerPackage(t *testing.T) {
 func TestBuildCodePlanOverflowFails(t *testing.T) {
 	dossier := validDossier(t)
 	dossier.Files = nil
-	// 500 files at 200 per package need 3 packages; cap at 2.
-	for i := 0; i < 500; i++ {
+	// 2500 files at 1000 per package need 3 packages; cap at 2.
+	for i := 0; i < 2500; i++ {
 		dossier.Files = append(dossier.Files, FileChange{
 			Path: fmt.Sprintf("f%03d.go", i), Status: "modified",
 			Diff: "@@ -1 +1 @@\n-a\n+b\n", Additions: 1, Deletions: 1,

@@ -1583,7 +1583,7 @@ func reasonerTask(d *Dossier) string {
 }
 
 // maxJobTracePromptBytes caps each job log excerpt rendered into a verify task.
-const maxJobTracePromptBytes = 4 << 10
+const maxJobTracePromptBytes = 32 << 10
 
 func verifyTask(d *Dossier, finding FindingOut) string {
 	payload := map[string]any{
