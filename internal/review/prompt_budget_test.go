@@ -282,7 +282,7 @@ func TestPromptBudgetShortDescriptionCompleteDiffHasNoGap(t *testing.T) {
 }
 
 func TestPromptBudgetEarlyUntrustedCopyCannotCountAsCoverage(t *testing.T) {
-	const fileCount = 14
+	const fileCount = 22
 	diff := strings.Repeat("x", maxFileDiffRunes)
 	files := make([]string, 0, fileCount)
 	for i := 0; i < fileCount; i++ {
@@ -625,7 +625,7 @@ func TestSecondSynthesisBoundsLongExtensionCoverageGap(t *testing.T) {
 // text must still carry the complete notice, and a clipped diff must lose its
 // coverage span instead of being reported as fully reviewed.
 func TestPromptBudgetReservesContextNoticeAtTaskEdge(t *testing.T) {
-	const fileCount = 14
+	const fileCount = 30
 	files := make([]string, 0, fileCount)
 	for i := 0; i < fileCount; i++ {
 		files = append(files, fmt.Sprintf("edge%02d.go", i))

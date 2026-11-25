@@ -10,13 +10,13 @@ import (
 // internal/review (review imports config), so these mirror defaultConfigYAML
 // and review.HardMaxFiles; keep them in sync.
 const (
-	reviewDefaultMaxFiles     = 200
+	reviewDefaultMaxFiles     = 1000
 	reviewMaxFilesHardLimit   = 1000
-	reviewDefaultMaxDiffLines = 30000
+	reviewDefaultMaxDiffLines = 300000
 	reviewDefaultLanguage     = "zh-CN"
 	// reviewDefaultMaxBackgroundRunes mirrors review.MaxBackgroundRunes; config
 	// cannot import review, so the value is duplicated and kept in sync.
-	reviewDefaultMaxBackgroundRunes = 20000
+	reviewDefaultMaxBackgroundRunes = 100000
 )
 
 // normalizeReviewDefaults replaces values that validateReviewDefaultsPolicy

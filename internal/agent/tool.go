@@ -27,7 +27,7 @@ const (
 	// context window, the caller's token budget or the context deadline.
 	DefaultMaxTurns = 0
 	// DefaultMaxToolOutput bounds one tool result in characters.
-	DefaultMaxToolOutput = 20000
+	DefaultMaxToolOutput = 50000
 	// maxSubmitRetries is the number of attempts after the first invalid
 	// submit_result that still receive feedback from the model.
 	maxSubmitRetries = 2

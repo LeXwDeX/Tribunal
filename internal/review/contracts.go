@@ -81,12 +81,12 @@ const (
 	MaxSummaryRunes    = 3000
 	MaxReasonRunes     = 8_000
 	MaxFindings        = 200
-	DefaultMaxPackages = 6
+	DefaultMaxPackages = 30
 	HardMaxPackages    = 100
-	DefaultMaxFiles    = 200
+	DefaultMaxFiles    = 1000
 	// MaxFilesPerPackage bounds a single package; it is the per-package limit
 	// enforced by Package.Validate and the buildCodePlan split threshold.
-	MaxFilesPerPackage = 200
+	MaxFilesPerPackage = 1000
 	// HardMaxFiles is the ceiling for a project's configured max_files. It is
 	// not a per-package bound; raising it lets large merge requests be reviewed
 	// in full instead of being truncated at the old 200-file cap.
@@ -94,7 +94,7 @@ const (
 	// MaxListedFiles bounds how many changed files the plan prompt lists. It is
 	// a display budget, not a review-coverage limit; files beyond it are omitted
 	// from the prompt and surfaced as a coverage signal.
-	MaxListedFiles = 2000
+	MaxListedFiles = 4000
 	// HardMaxDiffLines is the ceiling for a project's configured max_diff_lines.
 	HardMaxDiffLines = 300000
 	HardMaxExtends   = 2
@@ -184,7 +184,7 @@ type PlanOut struct {
 type Package struct {
 	ID       string   `json:"id" jsonschema:"pattern=^[a-z0-9_-]{1,32}$"`
 	Blocks   []string `json:"blocks" jsonschema:"minItems=1,maxItems=2,enum=code-review,enum=review"`
-	Files    []string `json:"files" jsonschema:"minItems=1,maxItems=200"`
+	Files    []string `json:"files" jsonschema:"minItems=1,maxItems=1000"`
 	Focus    string   `json:"focus" jsonschema:"minLength=1,maxLength=2000"`
 	Provider string   `json:"provider,omitempty"`
 }

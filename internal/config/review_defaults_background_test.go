@@ -5,12 +5,12 @@ import (
 	"testing"
 )
 
-// The built-in default budget must stay at 20000 so existing deployments keep
+// The built-in default budget must stay at 100000 so existing deployments keep
 // the historical background limit.
 func TestReviewDefaultsMaxBackgroundRunesDefault(t *testing.T) {
 	cfg := loadConfig(t)
-	if cfg.ReviewDefaults.MaxBackgroundRunes != 20000 {
-		t.Fatalf("default max_background_runes = %d, want 20000", cfg.ReviewDefaults.MaxBackgroundRunes)
+	if cfg.ReviewDefaults.MaxBackgroundRunes != 100000 {
+		t.Fatalf("default max_background_runes = %d, want 100000", cfg.ReviewDefaults.MaxBackgroundRunes)
 	}
 	if len(cfg.Warnings) != 0 {
 		t.Fatalf("valid defaults produced warnings: %v", cfg.Warnings)
@@ -25,8 +25,8 @@ review_defaults:
   max_background_runes: 0
 `)
 	cfg := loadConfig(t, path)
-	if cfg.ReviewDefaults.MaxBackgroundRunes != 20000 {
-		t.Fatalf("normalized max_background_runes = %d, want 20000", cfg.ReviewDefaults.MaxBackgroundRunes)
+	if cfg.ReviewDefaults.MaxBackgroundRunes != 100000 {
+		t.Fatalf("normalized max_background_runes = %d, want 100000", cfg.ReviewDefaults.MaxBackgroundRunes)
 	}
 	found := false
 	for _, warning := range cfg.Warnings {

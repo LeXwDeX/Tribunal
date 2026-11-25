@@ -12,10 +12,10 @@ import (
 )
 
 const (
-	MaxBackgroundRunes  = 20000
-	MaxDescriptionRunes = 8000
-	MaxTaskRunes        = 200000
-	MaxToolOutputRunes  = 20000
+	MaxBackgroundRunes  = 100000
+	MaxDescriptionRunes = 32000
+	MaxTaskRunes        = 300000
+	MaxToolOutputRunes  = 50000
 )
 
 var nonceRE = regexp.MustCompile(`^[A-Za-z0-9_-]{16,64}$`)

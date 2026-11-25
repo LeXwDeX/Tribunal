@@ -270,9 +270,9 @@ type readDiffInput struct {
 var readDiffSequence atomic.Int64
 
 const (
-	maxDiffHunksPerCall = 20
-	maxDiffLinesPerCall = 400
-	maxDiffRunesPerCall = 12000
+	maxDiffHunksPerCall = 100
+	maxDiffLinesPerCall = 2000
+	maxDiffRunesPerCall = 50000
 )
 
 type diffHunk struct {

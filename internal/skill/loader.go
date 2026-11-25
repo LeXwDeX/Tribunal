@@ -24,7 +24,7 @@ import (
 
 const (
 	// DefaultMaxOutputChars bounds one load_skill result.
-	DefaultMaxOutputChars = 20000
+	DefaultMaxOutputChars = 200000
 	// MaxOutputChars is the largest accepted load_skill output limit.
 	MaxOutputChars = 1 << 20
 

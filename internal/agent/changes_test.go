@@ -74,7 +74,7 @@ func TestReadDiffPagesAndRecordsCompleteHunks(t *testing.T) {
 func TestReadDiffNeedsEveryLineOfALargeHunk(t *testing.T) {
 	var lines []string
 	lines = append(lines, "@@ -1 +1 @@")
-	for i := 0; i < 500; i++ {
+	for i := 0; i < 2500; i++ {
 		lines = append(lines, "+line")
 	}
 	source := NewChangeSource([]ChangeFile{{Path: "big.go", Status: "modified", Diff: strings.Join(lines, "\n")}}, nil, nil)
@@ -101,7 +101,7 @@ func TestReadDiffNeedsEveryLineOfALargeHunk(t *testing.T) {
 			}
 		}
 	}
-	if nextLine < 2 || nextLine > 500 {
+	if nextLine < 2 || nextLine > maxDiffLinesPerCall {
 		t.Fatalf("next_line = %d, want a line inside the hunk", nextLine)
 	}
 	rest, err := invoke(t, read, `{"path":"big.go","from_hunk":1,"from_line":`+itoa(nextLine)+`}`)
@@ -281,7 +281,7 @@ func TestDroppedDeliveredPageStillCounts(t *testing.T) {
 func TestPartialPageFlushDoesNotCoverHunk(t *testing.T) {
 	var lines []string
 	lines = append(lines, "@@ -1 +1 @@")
-	for i := 0; i < 500; i++ {
+	for i := 0; i < 2500; i++ {
 		lines = append(lines, "+line")
 	}
 	source := NewChangeSource([]ChangeFile{{Path: "big.go", Status: "modified", Diff: strings.Join(lines, "\n")}}, nil, nil)

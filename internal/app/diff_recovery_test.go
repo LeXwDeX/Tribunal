@@ -189,10 +189,10 @@ func TestApplyDiffScopeCapsRecoveryAttempts(t *testing.T) {
 // The app-level recovery caps total fetched bytes, so an unending run of large
 // withheld bodies cannot be read in full.
 func TestApplyDiffScopeCapsFetchedBytes(t *testing.T) {
-	// Each added file yields one 4MB head body; the 32MB fetch bound stops the
-	// loop after eight files, before the ninth is read.
+	// Each added file yields one 4MB head body; the fetch bound stops the
+	// loop before the last file is read.
 	bigLine := strings.Repeat("x", 4<<20)
-	const files = 9
+	const files = (maxRecoveredFetchBytes / (4 << 20)) + 1
 	fake := &rawFileGitLab{reviewGitLab: newReviewGitLab(recoverHeadSHA)}
 	service := newScopeService(fake)
 	diffs := make([]gitlab.FileDiff, files)
