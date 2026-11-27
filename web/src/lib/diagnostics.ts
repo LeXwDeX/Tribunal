@@ -168,3 +168,88 @@ export function webhookStoredErrorHint(message: string): string | null {
   if (message.endsWith(': Maintainer role required')) return MAINTAINER_REQUIRED_HINT
   return null
 }
+
+// Registration and connection-check failures (#653). The server keeps its
+// English messages and field names for API clients; the console turns the
+// known code/field pairs into actionable Chinese text. Anything unknown is left
+// to the default error rendering.
+type ErrorDetail = { field?: string; message?: string }
+
+const SHARED_BOT_ACCESS_HINT = '平台 bot 看不到该项目，或在项目中的角色不足。请确认仓库地址正确，并在 GitLab 项目「成员」中把平台 bot 加为 Reporter 或更高角色；Guest、Minimal Access 或尚未接受的邀请都不够。'
+const REGISTRATION_DENIED_HINT = '无法登记该项目。请确认你在该项目中是 Reporter 或更高角色；若角色无误，请联系平台管理员确认平台 bot 已以 Reporter 或更高角色加入该项目。'
+
+function upstreamStatus(error: ApiError): number {
+  const match = /\(status (\d{3})\)/.exec(error.message)
+  return match ? Number(match[1]) : 0
+}
+
+function missingScope(message: string | undefined): string | null {
+  const match = /^(\S+) scope is required$/.exec(message || '')
+  return match ? match[1] : null
+}
+
+export function describeRegistrationField(error: ApiError, detail: ErrorDetail): string | null {
+  const status = error.code === 'gitlab_rejected' ? upstreamStatus(error) : 0
+  const message = detail.message || ''
+  switch (detail.field) {
+    case 'shared_bot_access':
+      return SHARED_BOT_ACCESS_HINT
+    case 'shared_bot_credential': {
+      if (status === 401) return '平台 bot 凭据无效、已过期或已撤销，请平台管理员更新 gitlab.bot_token_env 指向的凭据后重启服务。'
+      if (status === 403) return 'GitLab 拒绝了平台 bot 凭据：请平台管理员检查凭据的 scope（需要 api 和 read_repository），以及平台 bot 在该项目中的角色（需要 Reporter 或更高）。'
+      const scope = missingScope(message)
+      if (scope) return `平台 bot 凭据缺少 ${scope} scope，请平台管理员更换凭据后重启服务。`
+      if (message === 'must not be expired') return '平台 bot 凭据已过期，请平台管理员更换凭据后重启服务。'
+      return '平台 bot 凭据未激活或已撤销，请平台管理员更换凭据后重启服务。'
+    }
+    case 'provisioning_credential': {
+      if (status === 403) return '自动创建 Webhook 需要平台 Webhook 凭据在该项目中具有 Maintainer 角色。请提升该凭据对应账号的角色，或由项目 Maintainer 在 GitLab 中手动添加 Webhook。'
+      if (status === 401 || message.startsWith('must be valid')) return '平台 Webhook 凭据无效、已过期或已撤销，请平台管理员更新 gitlab.provisioning_token_env 指向的凭据后重启服务。'
+      if (message.startsWith('configure ')) return '平台未配置 Webhook 凭据，无法自动创建 Webhook。请平台管理员配置 gitlab.provisioning_token_env 后重启服务。'
+      const scope = missingScope(message)
+      if (scope) return `平台 Webhook 凭据缺少 ${scope} scope，请平台管理员更换凭据后重启服务。`
+      return '平台 Webhook 凭据不可用（未激活、已撤销或已过期），请平台管理员更换凭据后重启服务。'
+    }
+    case 'access_level':
+      if (status === 403) return MAINTAINER_REQUIRED_HINT
+      return '你在该项目中的角色低于 Reporter，无法登记。请先在 GitLab 申请 Reporter 或更高角色。'
+    case 'token':
+      if (status === 401) return 'GitLab 拒绝了访问 Key（401）：Key 无效、已过期或已撤销，请更换访问 Key。'
+      if (message === 'must not be empty') return '请填写访问 Key。'
+      if (message === 'must not be expired') return '访问 Key 已过期，请更换。'
+      if (message === 'must be active and not revoked') return '访问 Key 未激活或已撤销，请更换。'
+      if (message.startsWith('sign in with a GitLab account')) return '无法确认你的 GitLab 身份，请使用 GitLab 账号登录后重试。'
+      return null
+    case 'token.scopes': {
+      const scope = missingScope(message)
+      return scope ? `访问 Key 缺少 ${scope} scope，需要 api 和 read_repository。` : null
+    }
+    case 'project':
+      if (message === 'the project cannot be registered by this account') return REGISTRATION_DENIED_HINT
+      if (message.startsWith('must be a positive numeric ID')) return '请填写 GitLab 项目完整网址、group/project 路径或项目 ID，且地址必须属于本平台配置的 GitLab。'
+      return null
+    default:
+      return null
+  }
+}
+
+// describeRegistrationError returns the explanation for a failed registration
+// or connection check, or null when the default rendering should be used.
+export function describeRegistrationError(error: unknown): string | null {
+  if (!(error instanceof ApiError)) return null
+  const hints = (error.details || [])
+    .map((detail) => describeRegistrationField(error, detail))
+    .filter((hint): hint is string => Boolean(hint))
+  if (hints.length) return Array.from(new Set(hints)).join(' ')
+  if (error.code === 'conflict' && error.message.startsWith('local project data remains')) {
+    return '该项目仍有本地残留数据，需要平台管理员手动清理后才能重新登记。'
+  }
+  if (error.code !== 'gitlab_rejected') return null
+  const status = upstreamStatus(error)
+  if (status === 404) return 'GitLab 找不到该项目：请检查仓库地址；若项目为私有，请确认用于访问的账号或 Key 已加入该项目。'
+  if (status === 401) return 'GitLab 拒绝了访问凭据（401）：凭据无效、已过期或已撤销。'
+  if (status === 403) return 'GitLab 拒绝了该操作（403）：用于访问的账号或 Key 在该项目中权限不足。'
+  if (status === 429) return 'GitLab 限流，请稍后重试。'
+  const suffix = error.requestId ? `请求 ID：${error.requestId}。` : ''
+  return `GitLab 请求失败${status ? `（状态 ${status}）` : ''}，请稍后重试；持续失败请联系平台管理员。${suffix}`
+}

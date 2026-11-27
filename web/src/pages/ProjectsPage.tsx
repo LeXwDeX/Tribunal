@@ -12,7 +12,7 @@ import {
 } from '../components/ui'
 import { usePaginated } from '../lib/hooks'
 import { formatDate, labelForStatus, labelForWebhookState, webhookTone } from '../lib/format'
-import { tokenWarningText } from '../lib/diagnostics'
+import { describeRegistrationError, describeRegistrationField, tokenWarningText } from '../lib/diagnostics'
 import ui from '../styles/ui.module.css'
 import styles from './pages.module.css'
 import page from './projects.module.css'
@@ -54,9 +54,22 @@ function fieldErrorsFrom(error: unknown): Record<string, string> {
   if (!(error instanceof ApiError)) return {}
   const result: Record<string, string> = {}
   for (const detail of error.details || []) {
-    if (detail.field) result[detail.field] = detail.message || '输入无效。'
+    if (detail.field) result[detail.field] = describeRegistrationField(error, detail) || detail.message || '输入无效。'
   }
   return result
+}
+
+// RegistrationErrorState explains known registration and connection-check
+// failures in actionable text and falls back to the shared ErrorState.
+function RegistrationErrorState({ error, title }: { error: unknown; title: string }) {
+  const hint = describeRegistrationError(error)
+  if (!hint) return <ErrorState error={error} title={title} />
+  return (
+    <div className={ui.errorBox} role="alert">
+      <strong>{title}</strong>
+      <span>{hint}</span>
+    </div>
+  )
 }
 
 const ACCESS_LEVEL_ROLES: Record<number, string> = {
@@ -263,13 +276,13 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
             <li className={validation ? page.step : `${page.step} ${page.stepOn}`} aria-current={validation ? undefined : 'step'}><b>1</b>{sharedBotCredential ? '校验连接（可选）' : '校验连接'}</li>
             <li className={validation ? `${page.step} ${page.stepOn}` : page.step} aria-current={validation ? 'step' : undefined}><b>2</b>保存并初始化</li>
           </ol>
-          {validationError ? <ErrorState error={validationError} title="校验失败" /> : null}
+          {validationError ? <RegistrationErrorState error={validationError} title="校验失败" /> : null}
           {isAlreadyRegistered(error) ? (
             <div className={ui.errorBox} role="alert">
               <strong>项目已注册</strong>
               <span>该项目已注册。若列表中看不到它，说明你还没有访问权限，请联系管理员分配给你。</span>
             </div>
-          ) : error ? <ErrorState error={error} title="保存并初始化失败" /> : null}
+          ) : error ? <RegistrationErrorState error={error} title="保存并初始化失败" /> : null}
           {validation ? (
             <>
               <div className={page.resultOk} role="status">

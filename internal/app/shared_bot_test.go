@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -1224,6 +1225,66 @@ func TestDeniedEnvNamesIncludeSharedBotAndProvisioningTokens(t *testing.T) {
 	for name, found := range want {
 		if !found {
 			t.Fatalf("%s missing from denied environment: %v", name, names)
+		}
+	}
+}
+
+// A private project the shared bot is not a member of answers 404. A trusted
+// administrator must learn that the bot's membership is the likely cause
+// instead of a bare upstream status.
+func TestRegisterSharedCredentialTrustedAdminProjectNotFoundNamesSharedBot(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	api.fakeGitLab.mu.Lock()
+	api.projectErr = &gitlab.Error{Op: "get_project", Status: http.StatusNotFound}
+	api.fakeGitLab.mu.Unlock()
+	service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
+
+	_, err := service.Register(ctx, RegisterInput{
+		Project: "42", OwnerUserID: registrantUserID, AutoWebhook: true, TrustedPlatformAdmin: true,
+	})
+	assertAppError(t, err, "gitlab_rejected", "shared_bot_access")
+	var appErr *Error
+	if errors.As(err, &appErr) && appErr.Upstream != http.StatusNotFound {
+		t.Fatalf("upstream = %d, want 404", appErr.Upstream)
+	}
+	assertRegisterResidueFree(t, ctx, st, api)
+}
+
+func TestValidateSharedCredentialTrustedAdminProjectNotFoundNamesSharedBot(t *testing.T) {
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	api.fakeGitLab.mu.Lock()
+	api.projectErr = &gitlab.Error{Op: "get_project", Status: http.StatusNotFound}
+	api.fakeGitLab.mu.Unlock()
+	service := newSharedBotProjectService(t, openTestStore(t), api, sharedBotToken, nil)
+
+	_, err := service.Validate(context.Background(), ValidateProjectInput{Project: "42", TrustedPlatformAdmin: true})
+	assertAppError(t, err, "gitlab_rejected", "shared_bot_access")
+}
+
+// The non-trusted answer for an invisible project stays the unified denial so
+// a signed-in user cannot probe which projects the shared bot can see.
+func TestRegisterSharedCredentialNonTrustedProjectNotFoundStaysUnified(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	api.fakeGitLab.mu.Lock()
+	api.projectErr = &gitlab.Error{Op: "get_project", Status: http.StatusNotFound}
+	api.fakeGitLab.mu.Unlock()
+	service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
+
+	_, err := service.Register(ctx, RegisterInput{Project: "42", OwnerUserID: registrantUserID, AutoWebhook: true})
+	var appErr *Error
+	if !errors.As(err, &appErr) || appErr.Code != "validation_failed" || appErr.Message != "project registration is not permitted" {
+		t.Fatalf("error = %#v, want unified precheck denial", err)
+	}
+	for _, detail := range appErr.Details {
+		if detail.Field == "shared_bot_access" {
+			t.Fatalf("non-trusted denial leaked shared bot detail: %+v", appErr.Details)
 		}
 	}
 }

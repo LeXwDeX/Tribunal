@@ -6,10 +6,11 @@
 
 ### 升级前必读
 
-- 仅涉及控制台前端：无数据库迁移，无配置变更。
+- 无数据库迁移，无配置变更。
 
 ### 修复
 
+- **注册项目时的 GitLab 权限错误改为可理解的中文提示**（[#653](https://github.com/LeXwDeX/Tribunal/issues/653)）：共享 bot 模式下平台管理员注册 bot 看不到的项目（bot 未加入、角色为 Minimal Access 或邀请未接受）时，服务端不再只返回 `GitLab rejected the request (status 404)`，而是附加 `shared_bot_access` 字段说明原因，错误码与状态码不变；「校验连接」同样处理。注册对话框把平台 bot 角色不足、平台 bot 凭据失效、Webhook 凭据缺少 Maintainer、注册人角色低于 Reporter、统一预检拒绝等错误翻译为中文操作提示，不再显示英文原文与内部字段名；未识别的 GitLab 失败显示状态码与请求 ID。非管理员仍只看到统一的拒绝说明。
 - **注册对话框步骤条只点亮当前步骤**（[#633](https://github.com/LeXwDeX/Tribunal/issues/633)）：共享 bot 模式打开时不再直接点亮「保存并初始化」，校验通过前当前步骤为「校验连接（可选）」，通过后才切到第 2 步；仓库地址输入框占满整行，描述与底部提示去掉重复说明。
 - **表格首尾边距与面板对齐**（[#629](https://github.com/LeXwDeX/Tribunal/issues/629)）：表格每行首列左侧、末列右侧的内边距由 12px 改为 16px，与面板标题、工具栏和表格说明对齐；中间列不变。作用于全站表格。
 - **评审详情页对齐**（[#626](https://github.com/LeXwDeX/Tribunal/issues/626)）：「评审范围」「评审告警」「评审材料降级」列表去掉左缩进，与「生成文件」段落对齐；Findings 表的「提出 → 挑战 → 裁决」证据链不再换行。
