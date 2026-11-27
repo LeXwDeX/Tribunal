@@ -123,6 +123,15 @@ describe('web style checks', () => {
     expect(literal.message).toContain('var(--fs-body-sm) 或 var(--fs-label)')
   })
 
+  it('never reads the line-height after a spaced slash as the font size', () => {
+    expect(scanCss('.x { font: 600 var(--fs-body) / 20px var(--font-mono); }', 'x.module.css')).toEqual([])
+    const offScale = scanCss('.x { font: 600 22px / 1.1 var(--font-mono); }', 'x.module.css')
+    expect(offScale.map((d) => d.rule)).toEqual(['font-scale'])
+    expect(offScale[0].message).toContain('22px')
+    const onScale = scanCss('.x { font: 600 14px /20px var(--font-mono); }', 'x.module.css')
+    expect(onScale.map((d) => [d.rule, d.message.includes('14px')])).toEqual([['scale-literal', true]])
+  })
+
   it('accepts type scale tokens and non-px sizes', () => {
     for (const css of [
       '.x { font-size: var(--fs-body); }',

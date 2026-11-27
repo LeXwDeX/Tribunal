@@ -31,11 +31,12 @@ function loadFontScale() {
 }
 
 // fontSizeLiterals returns the px font sizes of a font-size or font shorthand
-// value. In the shorthand a size may carry a line-height after a slash, which
-// is not a font size.
+// value. In the shorthand a size may carry a line-height after a slash (with or
+// without spaces around it), which is not a font size.
 function fontSizeLiterals(prop, value) {
   if (prop === 'font-size') return [...value.matchAll(/\b\d+(?:\.\d+)?px\b/g)].map((match) => match[0])
-  return value.split(/\s+/)
+  // Join a spaced slash first so "14px / 20px" keeps 20px on the line-height side.
+  return value.replace(/\s*\/\s*/g, '/').split(/\s+/)
     .map((part) => part.split('/')[0])
     .filter((part) => /^\d+(?:\.\d+)?px$/.test(part))
 }
