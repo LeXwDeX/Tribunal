@@ -10,6 +10,12 @@
 
 ### 修复
 
+- **补齐控制台视觉改版遗留缺口**（[#657](https://github.com/LeXwDeX/Tribunal/issues/657)）：
+  - **字体**：自托管 IBM Plex Sans 与 JetBrains Mono（latin 子集，字重 400/500/600，只打包 woff2，约 138KB），不再依赖系统是否安装；中文与中文标点仍使用系统字体。
+  - **日历**：≤900px 时日期格与翻月按钮达到 44px 触控尺寸，320px 宽度下不溢出，日历打开期间跨越断点会即时调整尺寸。
+  - **控件描边**：输入框、下拉框、复选框、次要按钮等控件的描边与浅色主题的警告圆点加深，对比度达到 3:1。
+  - **检查与守卫**：字号守卫改为从 `tokens.css` 的 `--fs-*` 刻度读取允许值；加入 axe 无障碍自动化检查与颜色 token 对比度检查，覆盖亮暗两种主题。
+  - **评审结论标记**：字号由 22px 调整为刻度内的 18px。
 - **注册项目时的 GitLab 权限错误改为可理解的中文提示**（[#653](https://github.com/LeXwDeX/Tribunal/issues/653)）：共享 bot 模式下平台管理员注册 bot 看不到的项目（bot 未加入、角色为 Minimal Access 或邀请未接受；Guest 仍由原有的 Reporter 检查报告）时，服务端不再只返回 `GitLab rejected the request (status 404)`，而是附加 `shared_bot_access` 字段说明原因，错误码与状态码不变；「校验连接」同样处理。共享模式下自动创建 Webhook 返回 404 时附加 `provisioning_credential` 字段，指向平台 Webhook 凭据的项目成员身份。注册对话框把平台 bot 角色不足、平台 bot 凭据失效、Webhook 凭据缺少 Maintainer、注册人角色低于 Reporter、统一预检拒绝等错误翻译为中文操作提示，不再显示英文原文与内部字段名；未识别的 GitLab 失败显示状态码与请求 ID。非管理员仍只看到统一的拒绝说明。
 - **注册对话框步骤条只点亮当前步骤**（[#633](https://github.com/LeXwDeX/Tribunal/issues/633)）：共享 bot 模式打开时不再直接点亮「保存并初始化」，校验通过前当前步骤为「校验连接（可选）」，通过后才切到第 2 步；仓库地址输入框占满整行，描述与底部提示去掉重复说明。
 - **表格首尾边距与面板对齐**（[#629](https://github.com/LeXwDeX/Tribunal/issues/629)）：表格每行首列左侧、末列右侧的内边距由 12px 改为 16px，与面板标题、工具栏和表格说明对齐；中间列不变。作用于全站表格。

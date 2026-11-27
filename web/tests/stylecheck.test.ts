@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 // @ts-expect-error plain ESM helper script, not part of the app tsconfig
-import { checkDir, scanCss, scanNativeControls, scanTsx } from '../scripts/stylecheck.mjs'
+import { checkDir, fontScale, scanCss, scanNativeControls, scanTsx } from '../scripts/stylecheck.mjs'
+import { readFileSync } from 'node:fs'
 
 describe('web style checks', () => {
   it('requires the root element to reserve the scrollbar gutter', () => {
@@ -48,9 +49,9 @@ describe('web style checks', () => {
     expect(diagnostics.filter((d) => d.rule === 'root-scrollbar-gutter' || d.rule === 'overlay-gutter')).toEqual([])
   })
 
-  it('finds no color or scale literal violations in the application styles', () => {
+  it('finds no color, scale literal or off-scale font size violations in the application styles', () => {
     const diagnostics = checkDir('src')
-    expect(diagnostics.filter((d) => d.rule === 'color-literal' || d.rule === 'scale-literal')).toEqual([])
+    expect(diagnostics.filter((d) => ['color-literal', 'scale-literal', 'font-scale'].includes(d.rule))).toEqual([])
   })
 
   it('rejects color literals in component CSS', () => {
@@ -73,9 +74,75 @@ describe('web style checks', () => {
     expect(diagnostics).toHaveLength(0)
   })
 
-  it('accepts off-scale literals while the migration continues', () => {
+  it('accepts off-scale spacing literals while the migration continues', () => {
     const diagnostics = scanCss('.x { padding: 14px; gap: 9px; }', 'x.module.css')
     expect(diagnostics.filter((d) => d.rule === 'scale-literal')).toHaveLength(0)
+  })
+
+  it('reads the type scale from the --fs-* tokens', () => {
+    const scale = fontScale(readFileSync('src/styles/tokens.css', 'utf8'))
+    expect([...scale.keys()].sort((a, b) => parseFloat(a) - parseFloat(b)))
+      .toEqual(['12px', '13px', '14px', '15px', '16px', '18px', '28px'])
+    expect(scale.get('13px')).toEqual(['--fs-body-sm', '--fs-label'])
+    // Values of the pre-#601 scale are no longer on it.
+    for (const stale of ['11px', '11.5px', '12.5px', '13.5px', '17px', '21px', '22px', '30px']) {
+      expect([stale, scale.has(stale)]).toEqual([stale, false])
+    }
+  })
+
+  it('follows a change to the tokens instead of a fixed list', () => {
+    const scale = fontScale(':root { --fs-body: 15px; /* --fs-old: 11px; */ }\n@media (x) { :root { --fs-h1: 30px } }')
+    expect([...scale.keys()]).toEqual(['15px', '30px'])
+    expect(scanCss('.x { font-size: 30px; }', 'x.module.css', { fontScale: scale })
+      .filter((d) => d.rule === 'font-scale')).toHaveLength(0)
+    expect(scanCss('.x { font-size: 14px; }', 'x.module.css', { fontScale: scale })
+      .filter((d) => d.rule === 'font-scale')).toHaveLength(1)
+  })
+
+  it('refuses to run without a type scale', () => {
+    expect(() => fontScale(':root { --space-sm: 8px; }')).toThrow(/--fs-/)
+  })
+
+  it('rejects an off-scale font size in font-size and the font shorthand', () => {
+    for (const css of [
+      '.x { font-size: 22px; }',
+      '.x { font-size: 11.5px; }',
+      '.x { font: 600 22px/1.1 var(--font-mono); }',
+      '.x { font: var(--fw-bold) 17px var(--font-sans); }',
+    ]) {
+      const diagnostics = scanCss(css, 'x.module.css')
+      expect([css, diagnostics.filter((d) => d.rule === 'font-scale').length]).toEqual([css, 1])
+    }
+  })
+
+  it('passes on-scale sizes, and asks a literal for its token by name', () => {
+    for (const css of ['.x { font-size: 13px; }', '.x { font: 600 28px/1.1 var(--font-mono); }']) {
+      expect([css, scanCss(css, 'x.module.css').filter((d) => d.rule === 'font-scale')]).toEqual([css, []])
+    }
+    const [literal] = scanCss('.x { font-size: 13px; }', 'x.module.css').filter((d) => d.rule === 'scale-literal')
+    expect(literal.message).toContain('var(--fs-body-sm) 或 var(--fs-label)')
+  })
+
+  it('never reads the line-height after a spaced slash as the font size', () => {
+    expect(scanCss('.x { font: 600 var(--fs-body) / 20px var(--font-mono); }', 'x.module.css')).toEqual([])
+    const offScale = scanCss('.x { font: 600 22px / 1.1 var(--font-mono); }', 'x.module.css')
+    expect(offScale.map((d) => d.rule)).toEqual(['font-scale'])
+    expect(offScale[0].message).toContain('22px')
+    const onScale = scanCss('.x { font: 600 14px /20px var(--font-mono); }', 'x.module.css')
+    expect(onScale.map((d) => [d.rule, d.message.includes('14px')])).toEqual([['scale-literal', true]])
+  })
+
+  it('accepts type scale tokens and non-px sizes', () => {
+    for (const css of [
+      '.x { font-size: var(--fs-body); }',
+      '.x { font: var(--fw-bold) var(--fs-h2)/1.1 var(--font-mono); }',
+      '.x { font: inherit; }',
+      '.x { font-size: 0.9em; }',
+      '.x { font: 600 var(--fs-body)/20px var(--font-mono); }',
+    ]) {
+      const diagnostics = scanCss(css, 'x.module.css')
+      expect([css, diagnostics]).toEqual([css, []])
+    }
   })
 
   it('rejects static inline styles, including string and literal-only conditional values', () => {

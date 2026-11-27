@@ -46,7 +46,10 @@ function declarationsFor(css: string, selector: string): Map<string, string> {
   return props
 }
 
-const phone = splitMedia(uiCss, '(max-width: 900px)')
+// The narrow-phone block (#657) refines the 900px rules for viewports below
+// 360px; keep it out of both the phone and the desktop views.
+const narrow = splitMedia(uiCss, '(max-width: 359px)')
+const phone = splitMedia(narrow.outside, '(max-width: 900px)')
 
 // --control-h is 36px on desktop and 44px at <= 900px (styles/tokens.css), so a
 // control sized by it meets the 44px touch target on phones and stays compact
@@ -64,6 +67,43 @@ describe('touch targets at phone width (#601)', () => {
     expect(props.get('min-height')).toBe('var(--control-h)')
   })
 
+  // #657: day cells were 32px tall at every width.
+  it('gives each calendar day cell the control size', () => {
+    const props = declarationsFor(phone.inside, '.calendarDay')
+    expect(props.get('min-width')).toBe('var(--control-h)')
+    expect(props.get('height')).toBe('var(--control-h)')
+  })
+
+  // Seven 44px columns + 6 x 2px gaps + 2 x 8px padding + 2px border = 338px,
+  // inside the 340px touch popover width DatePicker uses at this breakpoint.
+  it('fits seven 44px day columns into the touch popover width', () => {
+    expect(declarationsFor(phone.inside, '.calendar').get('padding')).toBe('var(--space-sm)')
+    expect(declarationsFor(phone.outside, '.calendarGrid').get('gap')).toBe('2px')
+    const ui = readFileSync(resolve(srcRoot, 'components/ui.tsx'), 'utf8')
+    expect(ui).toMatch(/CALENDAR_TOUCH_SIZE = \{ width: 340, height: 432 \}/)
+    expect(7 * 44 + 6 * 2 + 2 * 8 + 2).toBeLessThanOrEqual(340)
+  })
+
+  // #657: below 360px the popover is the viewport minus 16px (304px at a
+  // 320px phone), narrower than seven 44px columns. The narrow rules drop the
+  // grid gap and most of the padding so each column still gets at least 40px.
+  it('keeps calendar day columns at least 40px wide down to a 320px viewport', () => {
+    const narrowCss = narrow.inside
+    expect(narrowCss).not.toBe('')
+    // Same specificity as the 900px rules, so the narrow block must come later.
+    expect(uiCss.indexOf('@media (max-width: 359px)')).toBeGreaterThan(uiCss.indexOf('@media (max-width: 900px)'))
+    const padding = declarationsFor(narrowCss, '.calendar').get('padding')
+    const gap = declarationsFor(narrowCss, '.calendarGrid').get('gap')
+    expect(padding).toBe('var(--space-2xs)')
+    expect(gap).toBe('0')
+    expect(declarationsFor(narrowCss, '.calendarDay').get('min-width')).toBe('0')
+    const tokens = readFileSync(resolve(srcRoot, 'styles/tokens.css'), 'utf8')
+    const space2xs = Number(tokens.match(/--space-2xs:\s*(\d+)px/)?.[1])
+    const popover = 320 - 16
+    const column = (popover - 2 - 2 * space2xs - 6 * 0) / 7
+    expect(column).toBeGreaterThanOrEqual(40)
+  })
+
   it('gives each select option row the control height', () => {
     expect(declarationsFor(phone.inside, '.selectOption').get('min-height')).toBe('var(--control-h)')
   })
@@ -73,9 +113,9 @@ describe('touch targets at phone width (#601)', () => {
     expect(declarationsFor(phone.inside, '.dateInputWrap .dateInput').get('padding-right')).toBe('var(--space-4xl)')
   })
 
-  // The calendar popover is positioned for 360px (usePopoverPosition in
-  // ui.tsx). 44px nav and action buttons add 16px per row, so the gaps around
-  // them shrink by 4px each to keep the natural height under that.
+  // The touch calendar popover is positioned for 432px (CALENDAR_TOUCH_SIZE in
+  // ui.tsx). The gaps around the 44px header and footer buttons shrink by 4px
+  // each to keep the natural height under that.
   it('trims the calendar gaps so the 44px buttons still fit the popover height', () => {
     expect(declarationsFor(phone.inside, '.calendarHeader').get('margin-bottom')).toBe('var(--space-2xs)')
     expect(declarationsFor(phone.inside, '.calendarFooter').get('padding-top')).toBe('var(--space-2xs)')
@@ -87,6 +127,9 @@ describe('touch targets at phone width (#601)', () => {
       expect([selector, props.get('width'), props.get('height')]).toEqual([selector, '28px', '28px'])
     }
     expect(declarationsFor(phone.outside, '.calendarAction').get('min-height')).toBe('28px')
+    expect(declarationsFor(phone.outside, '.calendarDay').get('height')).toBe('32px')
+    expect(declarationsFor(phone.outside, '.calendarDay').get('min-width')).toBe('0')
+    expect(declarationsFor(phone.outside, '.calendar').get('padding')).toBe('var(--space-md)')
     expect(declarationsFor(phone.outside, '.selectOption').get('min-height')).toBe('32px')
     expect(declarationsFor(phone.outside, '.calendarHeader').get('margin-bottom')).toBe('var(--space-sm)')
     expect(declarationsFor(phone.outside, '.calendarFooter').get('padding-top')).toBe('var(--space-sm)')

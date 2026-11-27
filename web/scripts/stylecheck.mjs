@@ -1,5 +1,5 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 
@@ -7,8 +7,39 @@ const COLOR_RE = /#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(/g
 const INLINE_STYLE_RE = /\bstyle=\{\{/g
 const JSX_COLOR_RE = /(?:fill|stroke|color|bgcolor)\s*=\s*["']\s*(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\)|hsla?\([^)]*\))/g
 const SPACE_VALUES = new Set(['1px', '4px', '6px', '8px', '12px', '16px', '20px', '24px', '32px', '48px'])
-const FONT_VALUES = new Set(['11px', '11.5px', '12px', '12.5px', '13.5px', '14px', '15px', '17px', '21px', '22px', '30px'])
 const SPACE_PROPS = /^(gap|padding(?:-[a-z]+)?|margin(?:-[a-z]+)?)$/
+const TOKENS_PATH = join(dirname(fileURLToPath(import.meta.url)), '../src/styles/tokens.css')
+
+// fontScale reads the type scale from the --fs-* custom properties of
+// tokens.css, so the guard cannot drift from the tokens it enforces. It maps
+// each px value to the token names that define it.
+export function fontScale(tokensText) {
+  const scale = new Map()
+  for (const match of withoutComments(tokensText).matchAll(/(--fs-[\w-]+)\s*:\s*(\d+(?:\.\d+)?px)\s*[;}]/g)) {
+    const names = scale.get(match[2]) || []
+    if (!names.includes(match[1])) names.push(match[1])
+    scale.set(match[2], names)
+  }
+  if (scale.size === 0) throw new Error('tokens.css 中没有找到 --fs-* 字号变量')
+  return scale
+}
+
+let defaultFontScale
+function loadFontScale() {
+  defaultFontScale ??= fontScale(readFileSync(TOKENS_PATH, 'utf8'))
+  return defaultFontScale
+}
+
+// fontSizeLiterals returns the px font sizes of a font-size or font shorthand
+// value. In the shorthand a size may carry a line-height after a slash (with or
+// without spaces around it), which is not a font size.
+function fontSizeLiterals(prop, value) {
+  if (prop === 'font-size') return [...value.matchAll(/\b\d+(?:\.\d+)?px\b/g)].map((match) => match[0])
+  // Join a spaced slash first so "14px / 20px" keeps 20px on the line-height side.
+  return value.replace(/\s*\/\s*/g, '/').split(/\s+/)
+    .map((part) => part.split('/')[0])
+    .filter((part) => /^\d+(?:\.\d+)?px$/.test(part))
+}
 
 function lineOf(text, index) {
   return text.slice(0, index).split('\n').length
@@ -105,9 +136,10 @@ function scanScrollbarGutter(clean, file) {
   return diagnostics
 }
 
-export function scanCss(text, file) {
+export function scanCss(text, file, options = {}) {
   const clean = withoutComments(text)
   const diagnostics = scanScrollbarGutter(clean, file)
+  const scale = options.fontScale || loadFontScale()
   for (const decl of declarations(clean)) {
     for (const match of decl.value.matchAll(COLOR_RE)) {
       diagnostics.push({
@@ -118,10 +150,28 @@ export function scanCss(text, file) {
         message: `颜色字面值 ${match[0]}；请使用 tokens.css 中的颜色变量`,
       })
     }
-    if (decl.prop === 'font-size' || SPACE_PROPS.test(decl.prop)) {
-      const allowed = decl.prop === 'font-size' ? FONT_VALUES : SPACE_VALUES
+    if (decl.prop === 'font-size' || decl.prop === 'font') {
+      // A size on the scale must name its token; a size off the scale has no
+      // token and breaks the type scale.
+      for (const size of fontSizeLiterals(decl.prop, decl.value)) {
+        const tokens = scale.get(size)
+        diagnostics.push(tokens ? {
+          file,
+          line: lineOf(clean, decl.index),
+          rule: 'scale-literal',
+          severity: 'error',
+          message: `${decl.prop} 使用了设计刻度内的字面值 ${size}；请使用 ${tokens.map((name) => `var(${name})`).join(' 或 ')}`,
+        } : {
+          file,
+          line: lineOf(clean, decl.index),
+          rule: 'font-scale',
+          severity: 'error',
+          message: `${decl.prop} 的 ${size} 不在 tokens.css 的 --fs-* 字号刻度内（${[...scale.keys()].sort((a, b) => parseFloat(a) - parseFloat(b)).join('、')}）；请改用刻度变量`,
+        })
+      }
+    } else if (SPACE_PROPS.test(decl.prop)) {
       for (const match of decl.value.matchAll(/\b(?:\d+(?:\.\d+)?px)\b/g)) {
-        if (!allowed.has(match[0])) continue
+        if (!SPACE_VALUES.has(match[0])) continue
         diagnostics.push({
           file,
           line: lineOf(clean, decl.index),
@@ -321,12 +371,15 @@ function walk(dir) {
 
 export function checkDir(root) {
   const diagnostics = []
+  // The scanned tree carries its own tokens; check against those.
+  const tokensPath = join(root, 'styles/tokens.css')
+  const options = existsSync(tokensPath) ? { fontScale: fontScale(readFileSync(tokensPath, 'utf8')) } : {}
   for (const path of walk(root)) {
     const text = readFileSync(path, 'utf8')
     const file = relative(root, path)
     if (path.endsWith('.css')) {
       if (path.endsWith('tokens.css')) continue
-      diagnostics.push(...scanCss(text, file))
+      diagnostics.push(...scanCss(text, file, options))
     } else {
       diagnostics.push(...scanTsx(text, file))
       diagnostics.push(...scanNativeControls(text, file))
