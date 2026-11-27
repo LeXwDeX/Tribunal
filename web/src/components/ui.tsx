@@ -998,15 +998,40 @@ const ModalContainerContext = createContext<React.RefObject<HTMLElement | null> 
 // The calendar keeps at least this height when the viewport is too short for
 // the space beside the anchor; overflow-y:auto keeps the grid reachable.
 const CALENDAR_MIN_HEIGHT = 180
-// Popover size for the mouse layout, and for touch widths (<= 900px, where
-// ui.module.css gives day cells, nav and footer buttons the 44px control
-// height): 7 x 44px columns + 6 x 2px gaps + 2 x 8px padding + 2px border =
-// 338px wide; header, weekday row, 6 rows of days and footer fit in 432px.
+// Touch layout breakpoint. It must match the `@media (max-width: 900px)`
+// blocks of styles/ui.module.css and styles/tokens.css (--control-h: 44px).
+const TOUCH_MEDIA_QUERY = '(max-width: 900px)'
+// Popover size for the mouse layout, and for touch widths (where ui.module.css
+// gives day cells, nav and footer buttons the 44px control height):
+// 7 x 44px columns + 6 x 2px gaps + 2 x 8px padding + 2px border = 338px wide;
+// header, weekday row, 6 rows of days and footer fit in 432px. Below 360px the
+// popover is capped at the viewport and the narrow rules in ui.module.css let
+// the columns share it.
 const CALENDAR_SIZE = { width: 292, height: 360 }
 const CALENDAR_TOUCH_SIZE = { width: 340, height: 432 }
 
-function calendarSize() {
-  const touch = typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 900px)').matches
+function touchLayoutMatches() {
+  return typeof window.matchMedia === 'function' && window.matchMedia(TOUCH_MEDIA_QUERY).matches
+}
+
+// useCalendarSize follows the touch breakpoint while the calendar is open, so
+// a rotation or window resize across 900px resizes the open popover.
+function useCalendarSize(open: boolean) {
+  const [touch, setTouch] = useState(touchLayoutMatches)
+  // Layout effect: a breakpoint crossed while closed is picked up before the
+  // opened popover paints at the old size.
+  useLayoutEffect(() => {
+    if (!open || typeof window.matchMedia !== 'function') return
+    const media = window.matchMedia(TOUCH_MEDIA_QUERY)
+    const update = () => setTouch(media.matches)
+    update()
+    if (typeof media.addEventListener === 'function') {
+      media.addEventListener('change', update)
+      return () => media.removeEventListener('change', update)
+    }
+    media.addListener?.(update)
+    return () => media.removeListener?.(update)
+  }, [open])
   return touch ? CALENDAR_TOUCH_SIZE : CALENDAR_SIZE
 }
 
@@ -1058,7 +1083,7 @@ export const DatePicker = forwardRef<HTMLInputElement, DatePickerProps>(function
   const [open, setOpen] = useState(false)
   const [viewDate, setViewDate] = useState<Date>(() => parseLocalDate(value) ?? new Date())
   const [focusDate, setFocusDate] = useState<Date>(() => parseLocalDate(value) ?? new Date())
-  const calendar = calendarSize()
+  const calendar = useCalendarSize(open)
   const popoverStyle = usePopoverPosition(open, inputRef, false, calendar.width, calendar.height, CALENDAR_MIN_HEIGHT)
   const portalTarget = modalContainerRef?.current ?? document.body
 

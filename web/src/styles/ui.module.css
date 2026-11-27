@@ -1805,6 +1805,22 @@
   }
 }
 
+/* Below 360px the calendar popover is the viewport minus 16px (304px on a
+   320px phone), narrower than seven 44px columns. Drop the grid gap and most
+   of the padding and let the day cells share the width: each column keeps at
+   least 40px, and the cells stay 44px tall. Must follow the 900px block. */
+@media (max-width: 359px) {
+  .calendar {
+    padding: var(--space-2xs);
+  }
+  .calendarGrid {
+    gap: 0;
+  }
+  .calendarDay {
+    min-width: 0;
+  }
+}
+
 /* ---------------------------------------------------------------------------
    Shared table primitive (DataTable in ui.tsx). Page modules must not style
    table elements; see docs/design/07-web-console.md. */

@@ -2,7 +2,7 @@ import { createRef, useState } from 'react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {
   Checkbox, DatePicker, Dialog, Disclosure, Drawer, Field, NumberField, SearchField, Select, Textarea, Tooltip,
@@ -662,6 +662,71 @@ describe('DatePicker popover size (#657)', () => {
       dispatchEvent: () => false,
     }) as MediaQueryList)
   }
+
+  // A controllable media query list: flipping it notifies the subscribers the
+  // way a browser does when the viewport crosses the breakpoint.
+  function stubChangingMedia(initial: boolean) {
+    let matches = initial
+    const listeners = new Set<(event: MediaQueryListEvent) => void>()
+    const spy = vi.spyOn(window, 'matchMedia').mockImplementation((query: string) => ({
+      get matches() { return matches && query === '(max-width: 900px)' },
+      media: query,
+      onchange: null,
+      addListener: (listener: (event: MediaQueryListEvent) => void) => listeners.add(listener),
+      removeListener: (listener: (event: MediaQueryListEvent) => void) => listeners.delete(listener),
+      addEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => listeners.add(listener),
+      removeEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => listeners.delete(listener),
+      dispatchEvent: () => false,
+    }) as unknown as MediaQueryList)
+    return {
+      spy,
+      listeners,
+      set(next: boolean) {
+        matches = next
+        act(() => {
+          for (const listener of [...listeners]) listener({ matches: next } as MediaQueryListEvent)
+        })
+      },
+    }
+  }
+
+  it('resizes an open calendar when the viewport crosses the touch breakpoint', async () => {
+    const media = stubChangingMedia(false)
+    try {
+      const user = userEvent.setup()
+      render(<DateHarness initial="2026-10-15" />)
+      await user.click(screen.getByRole('button', { name: '打开日历' }))
+      const calendar = screen.getByRole('dialog', { name: '选择日期' })
+      expect(calendar.style.width).toBe('292px')
+      media.set(true)
+      expect(calendar.style.width).toBe('340px')
+      expect(calendar.style.maxHeight).toBe('432px')
+      media.set(false)
+      expect(calendar.style.width).toBe('292px')
+      await user.keyboard('{Escape}')
+      expect(screen.queryByRole('dialog', { name: '选择日期' })).not.toBeInTheDocument()
+      expect(media.listeners.size).toBe(0)
+    } finally {
+      media.spy.mockRestore()
+    }
+  })
+
+  // Below 360px the popover is capped at the viewport minus 16px; the narrow
+  // phone rules in ui.module.css let the seven columns share that width.
+  it('caps the touch calendar to a 320px viewport', async () => {
+    const media = stubTouchWidth(true)
+    const originalWidth = window.innerWidth
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 320 })
+    try {
+      const user = userEvent.setup()
+      render(<DateHarness initial="2026-10-15" />)
+      await user.click(screen.getByRole('button', { name: '打开日历' }))
+      expect(screen.getByRole('dialog', { name: '选择日期' }).style.width).toBe('304px')
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
+      media.mockRestore()
+    }
+  })
 
   // At <= 900px ui.module.css gives each day cell the 44px control height and
   // width, so the popover must make room for seven 44px columns and six rows.
