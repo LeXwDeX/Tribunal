@@ -2,7 +2,7 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [1.10.0] - 2026-11-27
 
 ### 升级前必读
 
@@ -647,6 +647,8 @@ v1.0.0 之后的第一个版本：产品改名为 Tribunal，修复 1.0 复审�
 
 首个版本（GitHub Pre-release），交付 M0–M6 范围：webhook 与持久化队列、DAG 调度、主 agent 编排、对抗核验与裁决、GitLab 发布、三种 LLM 协议、工作区、MCP 与 Skill、OAuth、项目授权、Web 控制台和统计。详见 [Release v1.0.0](https://github.com/LeXwDeX/Tribunal/releases/tag/v1.0.0)。
 
+[1.10.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.9.2...v1.10.0
+[1.9.2]: https://github.com/LeXwDeX/Tribunal/compare/v1.9.1...v1.9.2
 [1.9.1]: https://github.com/LeXwDeX/Tribunal/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/LeXwDeX/Tribunal/compare/v1.7.1...v1.8.0
