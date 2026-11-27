@@ -1,4 +1,4 @@
-import { useId, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { deleteAlertAck, getStats, listAlertAcks, listModels, listProjects, listReviews, putAlertAck } from '../api/api'
@@ -357,6 +357,11 @@ export function OverviewPage() {
   const [showRead, setShowRead] = useState(false)
   const [pendingAcks, setPendingAcks] = useState<ReadonlySet<string>>(() => new Set())
   const alertIdPrefix = useId()
+  const ackButtons = useRef(new Map<string, HTMLButtonElement>())
+  const readToggle = useRef<HTMLButtonElement>(null)
+  // After an ack write settles, focus goes back to the row's button, or to a
+  // neighbour when the row was hidden, so keyboard focus never drops to body.
+  const focusTarget = useRef<{ id: string; order: string[]; acked: boolean } | null>(null)
 
   const projectNames = useMemo(
     () => new Map(projectsPage.items.map((project) => [project.id, project.path_with_namespace])),
@@ -375,8 +380,10 @@ export function OverviewPage() {
     return Array.from(issues.values())
   }, [failedRuns.items, failedPublications.items, pendingPublications.items])
   const ackMap = useMemo<AlertAcks>(
-    () => new Map((acksQuery.data?.acks || []).map((ack) => [ack.key, ack.fingerprint])),
-    [acksQuery.data],
+    // A failed refetch keeps the stale data; only a successful read may hide
+    // alerts, so the failure path shows every alert as the notice says.
+    () => new Map((acksQuery.isSuccess ? acksQuery.data.acks || [] : []).map((ack) => [ack.key, ack.fingerprint])),
+    [acksQuery.isSuccess, acksQuery.data],
   )
   const alerts = useMemo(
     () => buildAlerts(
@@ -395,7 +402,36 @@ export function OverviewPage() {
   const readCount = alerts.length - unreadCount
   const showingRead = showRead && readCount > 0
   const visibleAlerts = acksSettled ? alerts.filter((alert) => !alert.acked || showingRead) : []
+  useEffect(() => {
+    if (readCount === 0 && showRead) setShowRead(false)
+  }, [readCount, showRead])
+  useEffect(() => {
+    const target = focusTarget.current
+    if (!target || pendingAcks.has(target.id)) return
+    const current = alerts.find((alert) => alert.id === target.id)
+    // Wait until the ack cache reflects the write before moving focus.
+    if (current && current.acked !== target.acked) return
+    focusTarget.current = null
+    const active = document.activeElement
+    const own = ackButtons.current.get(target.id)
+    if (active && active !== document.body && active !== own) return
+    if (own) {
+      own.focus()
+      return
+    }
+    const index = target.order.indexOf(target.id)
+    const neighbours = [...target.order.slice(index + 1), ...target.order.slice(0, Math.max(index, 0)).reverse()]
+    for (const id of neighbours) {
+      const button = ackButtons.current.get(id)
+      if (button && !button.disabled) {
+        button.focus()
+        return
+      }
+    }
+    readToggle.current?.focus()
+  })
   const writeAck = async (alert: Alert, acked: boolean) => {
+    const order = visibleAlerts.map((item) => item.id)
     setPendingAcks((current) => new Set(current).add(alert.id))
     try {
       if (acked) {
@@ -403,14 +439,16 @@ export function OverviewPage() {
         queryClient.setQueryData<AlertAckList>(ALERT_ACKS_KEY, (current) => ({
           acks: [saved, ...(current?.acks || []).filter((ack) => ack.key !== saved.key)],
         }))
+        focusTarget.current = { id: alert.id, order, acked: true }
       } else {
         await deleteAlertAck(alert.id)
         queryClient.setQueryData<AlertAckList>(ALERT_ACKS_KEY, (current) => ({
           acks: (current?.acks || []).filter((ack) => ack.key !== alert.id),
         }))
-        if (readCount <= 1) setShowRead(false)
+        focusTarget.current = { id: alert.id, order, acked: false }
       }
     } catch (error) {
+      focusTarget.current = { id: alert.id, order, acked: alert.acked }
       toast.push('error', `${acked ? '标记已读' : '撤销已读'}失败：${errorMessage(error)}`)
     } finally {
       setPendingAcks((current) => {
@@ -509,7 +547,7 @@ export function OverviewPage() {
                 <span>检查范围：token 过期、工作区异常、停用项目{providersEnabled ? '、provider 错误' : ''}、评审执行失败和发布失败、已完成但未完成（服务端计数）或含失败/跳过节点（按最近加载的评审计数）的评审</span>
                 {acksSettled && unreadCount ? <span>{unreadCount}{hasMoreIssues ? '+' : ''} 项</span> : null}
                 {acksReady && readCount ? (
-                  <Button variant="ghost" size="sm" aria-pressed={showingRead} onClick={() => setShowRead(!showingRead)}>显示已读（{readCount}）</Button>
+                  <Button ref={readToggle} variant="ghost" size="sm" aria-pressed={showingRead} onClick={() => setShowRead(!showingRead)}>显示已读（{readCount}）</Button>
                 ) : null}
               </>
             )}
@@ -550,6 +588,10 @@ export function OverviewPage() {
                   </div>
                   {ackable ? (
                     <Button
+                      ref={(element) => {
+                        if (element) ackButtons.current.set(alert.id, element)
+                        else ackButtons.current.delete(alert.id)
+                      }}
                       variant="secondary"
                       size="sm"
                       className={overview.alertAck}

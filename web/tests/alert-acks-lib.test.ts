@@ -59,13 +59,16 @@ describe('alert ack fingerprints', () => {
     expect(isAcked(stored, 'token-42', tokenFingerprint(reRegistered, 'warn'))).toBe(false)
   })
 
-  it('workspace alert reappears when the error or refresh time changes', () => {
-    const project = { created_at: '2026-01-01T00:00:00Z', workspace: { last_error: 'clone failed', last_refresh_at: '2026-02-01T00:00:00Z' } }
+  it('workspace alert reappears when the error, refresh time or base changes', () => {
+    const project = { created_at: '2026-01-01T00:00:00Z', workspace: { last_error: 'clone failed', last_refresh_at: '2026-02-01T00:00:00Z', base_sha: 'aaa111' } }
     const stored = acks({ 'workspace-42': workspaceFingerprint(project) })
     expect(isAcked(stored, 'workspace-42', workspaceFingerprint({ ...project, workspace: { ...project.workspace } }))).toBe(true)
     expect(isAcked(stored, 'workspace-42', workspaceFingerprint({ ...project, workspace: { ...project.workspace, last_error: 'index failed' } }))).toBe(false)
     expect(isAcked(stored, 'workspace-42', workspaceFingerprint({ ...project, workspace: { ...project.workspace, last_refresh_at: '2026-03-01T00:00:00Z' } }))).toBe(false)
     expect(isAcked(stored, 'workspace-42', workspaceFingerprint({ ...project, created_at: '2026-05-01T00:00:00Z' }))).toBe(false)
+    // A plain successful base refresh moves base_sha but not last_refresh_at;
+    // recovering and failing again with the same error must reappear.
+    expect(isAcked(stored, 'workspace-42', workspaceFingerprint({ ...project, workspace: { ...project.workspace, base_sha: 'bbb222' } }))).toBe(false)
   })
 
   it('disabled alert reappears after the project revision changes', () => {

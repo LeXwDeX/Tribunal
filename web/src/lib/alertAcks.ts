@@ -35,10 +35,15 @@ export function tokenFingerprint(project: { created_at?: string; token_expires_a
   return `${project.created_at || ''}|${project.token_expires_at || ''}|${stage}`
 }
 
-// A failed refresh keeps last_refresh_at (only a successful refresh or
-// onboarding advances it), so the value only changes across a recovery.
-export function workspaceFingerprint(project: { created_at?: string; workspace?: { last_error?: string; last_refresh_at?: string } }): string {
-  return `${project.created_at || ''}|${fnv1a(project.workspace?.last_error || '')}|${project.workspace?.last_refresh_at || ''}`
+// A failed operation keeps both last_refresh_at and base_sha. last_refresh_at
+// only advances on onboarding or a successful context generation; a plain
+// successful base refresh moves base_sha instead. Together they change across
+// most recoveries. Known gap: a recovery that moves neither (for example a
+// refresh that finds the same base and skips context generation) followed by
+// the same classified error keeps the alert read.
+export function workspaceFingerprint(project: { created_at?: string; workspace?: { last_error?: string; last_refresh_at?: string; base_sha?: string } }): string {
+  const workspace = project.workspace
+  return `${project.created_at || ''}|${fnv1a(workspace?.last_error || '')}|${workspace?.last_refresh_at || ''}|${workspace?.base_sha || ''}`
 }
 
 export function disabledFingerprint(project: { created_at?: string; revision?: number; updated_at?: string }): string {
@@ -124,7 +129,9 @@ export function aggregateAckState(hits: readonly TimedHit[], hasMore: boolean, s
   if (stored === undefined) return { acked: false, count: hits.length, plus: hasMore, sinceAck: false }
   const fresh = countSinceWatermark(hits, stored)
   if (fresh === 0) return { acked: true, count: hits.length, plus: hasMore, sinceAck: false }
-  // Unloaded pages are older by created_at; they can only add new hits when
-  // every loaded hit is already new.
+  // Accepted approximation: pages are ordered by created_at, not finished_at,
+  // so an unloaded older-created review may have finished after the
+  // watermark. "+" is kept only when every loaded hit is new; otherwise the
+  // count covers the loaded hits only.
   return { acked: false, count: fresh, plus: hasMore && fresh === hits.length, sinceAck: true }
 }
