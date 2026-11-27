@@ -70,23 +70,23 @@ web/
 
 「需要处理」面板的已读（[#656](https://github.com/LeXwDeX/Tribunal/issues/656)）：
 
-- 每条告警行末有「已读」按钮（无障碍名称「标记已读：<标签>」，`aria-describedby` 指向告警正文）。点击后按钮进入加载状态，等 `PUT /api/v1/alert-acks/{key}` 成功后才隐藏该行并更新本地缓存；失败时用 toast 提示，行保留。
+- 每条告警行末有「已读」按钮（无障碍名称「标记已读：<标签>」，`aria-describedby` 指向告警正文）。点击后按钮进入加载状态，等 `PUT /api/v1/alert-acks/{key}` 成功后才隐藏该行并更新本地缓存；失败时用 toast 提示，行保留。写入结束后焦点回到该行按钮；行被隐藏时移到下一行的已读按钮，没有下一行时移到上一行，都没有时移到「显示已读」切换按钮，不会落到页面 body。
 - 面板 aside 的「N 项」只统计未读告警；全部已读时显示「无未读告警」（没有任何告警时仍显示「无异常」）。有已读项时 aside 显示「显示已读（N）」切换按钮（带 `aria-pressed`）；展开后已读行以弱化颜色显示，按钮变为「撤销已读」，调用 `DELETE /api/v1/alert-acks/{key}`。不提供「全部已读」。
-- 已读记录（`GET /api/v1/alert-acks`）加载完成前不渲染告警行；加载失败时显示全部告警、不显示已读按钮，并以 `role="status"` 提示「已读记录加载失败」。宁可多显示，不少显示。
+- 已读记录（`GET /api/v1/alert-acks`）加载完成前不渲染告警行；加载失败（包括已有缓存后的重新读取失败）时不使用缓存的已读记录，显示全部告警、不显示已读按钮，并以 `role="status"` 提示「已读记录加载失败」。宁可多显示，不少显示。
 - 已读按用户保存在服务端，换设备或浏览器后仍有效；不同用户互不影响。
 - 单对象告警在指纹不变时保持已读，指纹变化即重新出现。项目类指纹都包含项目 `created_at`，项目删除后用同一 ID 重新注册不会被旧记录隐藏；错误文本只以 FNV-1a 哈希进入指纹。
 
 | 告警键 | 指纹 | 重新出现的条件 |
 |---|---|---|
 | `token-<项目>` | `created_at\|token_expires_at\|档位`，档位只分 warn（30 天内）/ danger（已过期） | 进入已过期、轮换后再次临近过期 |
-| `workspace-<项目>` | `created_at\|hash(last_error)\|last_refresh_at` | 错误变化；恢复后再次出错（失败的刷新不推进 `last_refresh_at`，只有成功刷新或 onboarding 推进） |
+| `workspace-<项目>` | `created_at\|hash(last_error)\|last_refresh_at\|base_sha` | 错误分类变化；恢复后再次出错且期间 `base_sha` 或 `last_refresh_at` 有变化。失败的操作两者都不改；普通的成功刷新推进 `base_sha`，onboarding 与成功的上下文生成推进 `last_refresh_at`。已知缺口：恢复时两者都没变（例如刷新得到同一 base 且未重新生成上下文），随后又以同一分类错误失败，告警保持已读 |
 | `disabled-<项目>` | `created_at\|revision`（旧服务端无 `revision` 时用 `updated_at`） | 设置或启停状态被修改 |
 | `provider-<ID>` | `UTC 日期\|errors` | 同一 UTC 日内错误数上升，或次日仍有错误（近似规则：provider 只有滚动 24 小时计数） |
 | `review-<评审>` | `failed` | 不会重新出现；重跑会产生新的评审 ID |
 | `publication-<评审>` | `failed\|hash(publication_error)` | 失败原因变化 |
 | `retry-<评审>` | `hash(publication_error 或 error)` | 重试原因变化 |
 
-- 聚合告警（「评审未完成」`reviews-incomplete`、「评审节点异常」`reviews-node-issues`）的指纹是已读时所见命中集的 `max(finished_at)` 水位（缺少 `finished_at` 时用 `created_at`），且只增不减。之后只统计 `finished_at` 晚于水位的命中项，有新增时告警以「自上次已读后新增 N 个…」重新出现；没有新增时视为已读，展开「显示已读」看到的是完整计数。不用 `created_at`（先创建、后结束的评审会被漏掉），也不用已读时间（加载后、点击前才结束的评审会被误算为已读）。只比较已加载的数据，不给 `/reviews` 增加时间过滤；「评审未完成」只有在已加载的命中项全部晚于水位且还有下一页时才保留 `+`。
+- 聚合告警（「评审未完成」`reviews-incomplete`、「评审节点异常」`reviews-node-issues`）的指纹是已读时所见命中集的 `max(finished_at)` 水位（缺少 `finished_at` 时用 `created_at`），且只增不减。之后只统计 `finished_at` 晚于水位的命中项，有新增时告警以「自上次已读后新增 N 个…」重新出现；没有新增时视为已读，展开「显示已读」看到的是完整计数。不用 `created_at`（先创建、后结束的评审会被漏掉），也不用已读时间（加载后、点击前才结束的评审会被误算为已读）。只比较已加载的数据，不给 `/reviews` 增加时间过滤；「评审未完成」只有在已加载的命中项全部晚于水位且还有下一页时才保留 `+`；列表按 `created_at` 分页，未加载的较早创建的评审可能在水位之后才结束，这是接受的近似。撤销最后一条已读后「显示已读」自动收起。
 
 ### 3.2 评审列表
 
