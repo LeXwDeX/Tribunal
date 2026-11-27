@@ -649,6 +649,40 @@ describe('DatePicker', () => {
   })
 })
 
+describe('DatePicker popover size (#657)', () => {
+  function stubTouchWidth(matches: boolean) {
+    return vi.spyOn(window, 'matchMedia').mockImplementation((query: string) => ({
+      matches: matches && query === '(max-width: 900px)',
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    }) as MediaQueryList)
+  }
+
+  // At <= 900px ui.module.css gives each day cell the 44px control height and
+  // width, so the popover must make room for seven 44px columns and six rows.
+  it.each([
+    [false, 292, 360],
+    [true, 340, 432],
+  ])('touch width %s sizes the calendar %ipx wide and up to %ipx tall', async (touch, width, height) => {
+    const media = stubTouchWidth(touch)
+    try {
+      const user = userEvent.setup()
+      render(<DateHarness initial="2026-10-15" />)
+      await user.click(screen.getByRole('button', { name: '打开日历' }))
+      const calendar = screen.getByRole('dialog', { name: '选择日期' })
+      expect(calendar.style.width).toBe(`${width}px`)
+      expect(calendar.style.maxHeight).toBe(`${height}px`)
+    } finally {
+      media.mockRestore()
+    }
+  })
+})
+
 function DatePickerInDialogHarness() {
   const [value, setValue] = useState('2026-10-15')
   return (

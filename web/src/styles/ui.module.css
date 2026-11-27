@@ -1777,11 +1777,21 @@
     min-width: var(--control-h);
     min-height: var(--control-h);
   }
+  /* Day cells reach the 44px touch target too. Seven 44px columns need a
+     wider popover (DatePicker sizes it for touch widths), so the padding
+     around the grid shrinks to keep it inside a 360px-wide phone. */
+  .calendar {
+    padding: var(--space-sm);
+  }
+  .calendarDay {
+    min-width: var(--control-h);
+    height: var(--control-h);
+  }
   .selectOption {
     min-height: var(--control-h);
   }
-  /* The 44px nav and action buttons grow the calendar past the 360px popover
-     height it is positioned for, so trim the gaps around them to avoid a scroll. */
+  /* The 44px buttons and day cells grow the calendar, so trim the gaps around
+     the header and footer to keep it inside the touch popover height. */
   .calendarHeader {
     margin-bottom: var(--space-2xs);
   }

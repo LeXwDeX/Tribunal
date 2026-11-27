@@ -64,6 +64,23 @@ describe('touch targets at phone width (#601)', () => {
     expect(props.get('min-height')).toBe('var(--control-h)')
   })
 
+  // #657: day cells were 32px tall at every width.
+  it('gives each calendar day cell the control size', () => {
+    const props = declarationsFor(phone.inside, '.calendarDay')
+    expect(props.get('min-width')).toBe('var(--control-h)')
+    expect(props.get('height')).toBe('var(--control-h)')
+  })
+
+  // Seven 44px columns + 6 x 2px gaps + 2 x 8px padding + 2px border = 338px,
+  // inside the 340px touch popover width DatePicker uses at this breakpoint.
+  it('fits seven 44px day columns into the touch popover width', () => {
+    expect(declarationsFor(phone.inside, '.calendar').get('padding')).toBe('var(--space-sm)')
+    expect(declarationsFor(uiCss, '.calendarGrid').get('gap')).toBe('2px')
+    const ui = readFileSync(resolve(srcRoot, 'components/ui.tsx'), 'utf8')
+    expect(ui).toMatch(/CALENDAR_TOUCH_SIZE = \{ width: 340, height: 432 \}/)
+    expect(7 * 44 + 6 * 2 + 2 * 8 + 2).toBeLessThanOrEqual(340)
+  })
+
   it('gives each select option row the control height', () => {
     expect(declarationsFor(phone.inside, '.selectOption').get('min-height')).toBe('var(--control-h)')
   })
@@ -73,9 +90,9 @@ describe('touch targets at phone width (#601)', () => {
     expect(declarationsFor(phone.inside, '.dateInputWrap .dateInput').get('padding-right')).toBe('var(--space-4xl)')
   })
 
-  // The calendar popover is positioned for 360px (usePopoverPosition in
-  // ui.tsx). 44px nav and action buttons add 16px per row, so the gaps around
-  // them shrink by 4px each to keep the natural height under that.
+  // The touch calendar popover is positioned for 432px (CALENDAR_TOUCH_SIZE in
+  // ui.tsx). The gaps around the 44px header and footer buttons shrink by 4px
+  // each to keep the natural height under that.
   it('trims the calendar gaps so the 44px buttons still fit the popover height', () => {
     expect(declarationsFor(phone.inside, '.calendarHeader').get('margin-bottom')).toBe('var(--space-2xs)')
     expect(declarationsFor(phone.inside, '.calendarFooter').get('padding-top')).toBe('var(--space-2xs)')
@@ -87,6 +104,9 @@ describe('touch targets at phone width (#601)', () => {
       expect([selector, props.get('width'), props.get('height')]).toEqual([selector, '28px', '28px'])
     }
     expect(declarationsFor(phone.outside, '.calendarAction').get('min-height')).toBe('28px')
+    expect(declarationsFor(phone.outside, '.calendarDay').get('height')).toBe('32px')
+    expect(declarationsFor(phone.outside, '.calendarDay').get('min-width')).toBe('0')
+    expect(declarationsFor(phone.outside, '.calendar').get('padding')).toBe('var(--space-md)')
     expect(declarationsFor(phone.outside, '.selectOption').get('min-height')).toBe('32px')
     expect(declarationsFor(phone.outside, '.calendarHeader').get('margin-bottom')).toBe('var(--space-sm)')
     expect(declarationsFor(phone.outside, '.calendarFooter').get('padding-top')).toBe('var(--space-sm)')
