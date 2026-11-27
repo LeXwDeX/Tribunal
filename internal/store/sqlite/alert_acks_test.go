@@ -35,6 +35,26 @@ func ackMap(t *testing.T, s *Store, userID int64) map[string]store.AlertAck {
 	return out
 }
 
+// seedAlertAcks inserts rows directly so cap tests do not pay for a
+// thousand separate write transactions.
+func seedAlertAcks(t *testing.T, s *Store, userID int64, prefix string, n int, base time.Time, step time.Duration) {
+	t.Helper()
+	tx, err := s.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < n; i++ {
+		if _, err := tx.Exec(`INSERT INTO alert_acks (user_id, alert_key, fingerprint, acked_at) VALUES (?, ?, 'f', ?)`,
+			userID, fmt.Sprintf("%s-%04d", prefix, i), formatTime(base.Add(time.Duration(i)*step))); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAlertAcksAreIsolatedPerUser(t *testing.T) {
 	ctx := context.Background()
 	clock := newFakeClock()
@@ -109,11 +129,10 @@ func TestAlertAckPutEvictsOldestBeyondCap(t *testing.T) {
 	}
 
 	base := clock.Now()
-	for i := 0; i < store.MaxAlertAcksPerUser; i++ {
-		key := fmt.Sprintf("review-%04d", i)
-		if _, err := s.PutAlertAck(ctx, 7, store.AlertAck{Key: key, Fingerprint: "failed", AckedAt: base.Add(time.Duration(i) * time.Second)}); err != nil {
-			t.Fatalf("PutAlertAck(%s): %v", key, err)
-		}
+	seedAlertAcks(t, s, 7, "review", store.MaxAlertAcksPerUser-1, base, time.Second)
+	last := fmt.Sprintf("review-%04d", store.MaxAlertAcksPerUser-1)
+	if _, err := s.PutAlertAck(ctx, 7, store.AlertAck{Key: last, Fingerprint: "failed", AckedAt: base.Add(time.Duration(store.MaxAlertAcksPerUser-1) * time.Second)}); err != nil {
+		t.Fatalf("PutAlertAck(%s): %v", last, err)
 	}
 	if got := ackMap(t, s, 7); len(got) != store.MaxAlertAcksPerUser {
 		t.Fatalf("acks = %d, want %d", len(got), store.MaxAlertAcksPerUser)
@@ -149,11 +168,7 @@ func TestAlertAckConcurrentPutsKeepCap(t *testing.T) {
 	s := openTestStore(t, clock)
 	alertAckUser(t, s, 7, "alice", clock.Now())
 	base := clock.Now()
-	for i := 0; i < store.MaxAlertAcksPerUser-5; i++ {
-		if _, err := s.PutAlertAck(ctx, 7, store.AlertAck{Key: fmt.Sprintf("seed-%04d", i), Fingerprint: "f", AckedAt: base}); err != nil {
-			t.Fatal(err)
-		}
-	}
+	seedAlertAcks(t, s, 7, "seed", store.MaxAlertAcksPerUser-5, base, 0)
 	var wg sync.WaitGroup
 	errs := make(chan error, 20)
 	for i := 0; i < 20; i++ {
