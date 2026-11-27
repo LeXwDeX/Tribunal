@@ -1,8 +1,9 @@
-import { useMemo, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { useId, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { getStats, listModels, listProjects, listReviews } from '../api/api'
-import type { ModelHealth, Project, ReviewListItem, ReviewSummary, Stats } from '../api/types'
+import { deleteAlertAck, getStats, listAlertAcks, listModels, listProjects, listReviews, putAlertAck } from '../api/api'
+import { errorMessage } from '../api/client'
+import type { AlertAckList, ModelHealth, Project, ReviewListItem, ReviewSummary, Stats } from '../api/types'
 import { useCanRegisterProject, useCanWrite } from '../components/RoleContext'
 import { ReviewTable } from '../components/ReviewTable'
 import { TriggerReviewDialog } from '../components/TriggerReviewDialog'
@@ -14,6 +15,11 @@ import { readNumber } from '../lib/format'
 import { formatMs, formatRatio, statNumber } from '../lib/stats'
 import { describeWorkspaceError } from '../lib/diagnostics'
 import { REVIEW_STAGES, deriveReviewStage } from '../lib/reviewStage'
+import {
+  ALERT_KEY_PATTERN, REVIEW_FAILURE_FINGERPRINT, aggregateAckState, disabledFingerprint, isAcked, providerAcked,
+  providerFingerprint, publicationFingerprint, retryFingerprint, tokenFingerprint, tokenStage, watermarkFingerprint,
+  workspaceFingerprint, type AlertAcks,
+} from '../lib/alertAcks'
 import styles from './pages.module.css'
 import ui from '../styles/ui.module.css'
 import overview from './OverviewPage.module.css'
@@ -25,7 +31,12 @@ interface Alert {
   text: string
   href: string
   action: string
+  /** Stored on ack; compared with the stored value to decide read state. */
+  fingerprint: string
+  acked: boolean
 }
+
+const ALERT_ACKS_KEY = ['alert-acks']
 
 type ReviewIssueKind = 'run' | 'publication' | 'retry'
 
@@ -71,18 +82,25 @@ function buildAlerts(
   providers: ModelHealth[],
   reviewIssues: ReviewIssue[],
   reviews: ReviewListItem[],
-  incomplete: { count: number; hasMore: boolean },
+  incomplete: { items: ReviewListItem[]; hasMore: boolean },
+  acks: AlertAcks,
 ): Alert[] {
   const alerts: Alert[] = []
   const now = Date.now()
+  // Single-object alerts are read while the fingerprint is unchanged.
+  const push = (alert: Omit<Alert, 'acked'>, acked = isAcked(acks, alert.id, alert.fingerprint)) => {
+    alerts.push({ ...alert, acked })
+  }
   for (const project of projects) {
     const expires = project.token_expires_at ? new Date(project.token_expires_at).getTime() : NaN
     if (!Number.isNaN(expires)) {
       const days = Math.ceil((expires - now) / 86_400_000)
       if (days <= 30) {
-        alerts.push({
+        const stage = tokenStage(days)
+        push({
           id: `token-${project.id}`,
-          tone: days <= 0 ? 'danger' : 'warn',
+          fingerprint: tokenFingerprint(project, stage),
+          tone: stage,
           label: days <= 0 ? '已过期' : '提醒',
           text: `${project.path_with_namespace} 的 token ${days <= 0 ? '已过期' : `将在 ${days} 天后过期`}。`,
           href: `/projects/${project.id}/settings`,
@@ -92,8 +110,9 @@ function buildAlerts(
     }
     const workspaceState = project.workspace?.state || project.workspace_state
     if (workspaceState === 'error') {
-      alerts.push({
+      push({
         id: `workspace-${project.id}`,
+        fingerprint: workspaceFingerprint(project),
         tone: 'danger',
         label: '工作区',
         text: `${project.path_with_namespace} 工作区异常${project.workspace?.last_error ? `：${describeWorkspaceError(project.workspace.last_error)}` : '。'}`,
@@ -102,8 +121,9 @@ function buildAlerts(
       })
     }
     if (!project.enabled) {
-      alerts.push({
+      push({
         id: `disabled-${project.id}`,
+        fingerprint: disabledFingerprint(project),
         tone: 'warn',
         label: '已停用',
         text: `${project.path_with_namespace} 已停用，webhook 事件将被忽略。`,
@@ -116,21 +136,24 @@ function buildAlerts(
     const errors = readNumber(provider.stats_24h, ['errors'])
     const rate = readNumber(provider.stats_24h, ['error_rate'])
     if (errors && errors > 0) {
-      alerts.push({
-        id: `provider-${provider.id}`,
+      const id = `provider-${provider.id}`
+      push({
+        id,
+        fingerprint: providerFingerprint(errors, now),
         tone: 'warn',
         label: 'Provider',
         text: `${provider.display_name} 近 24 小时有 ${errors} 次错误${typeof rate === 'number' ? `（错误率 ${formatRatio(rate)}）` : ''}。`,
         href: '/models',
         action: '查看模型',
-      })
+      }, providerAcked(acks.get(id), errors, now))
     }
   }
   for (const { review, kind } of reviewIssues) {
     const title = `!${review.mr_iid} ${review.mr_title || ''}`.trim()
     if (kind === 'run') {
-      alerts.push({
+      push({
         id: `review-${review.id}`,
+        fingerprint: REVIEW_FAILURE_FINGERPRINT,
         tone: 'danger',
         label: '评审失败',
         text: `${title} 执行失败。`,
@@ -138,8 +161,9 @@ function buildAlerts(
         action: '查看评审',
       })
     } else if (kind === 'publication') {
-      alerts.push({
+      push({
         id: `publication-${review.id}`,
+        fingerprint: publicationFingerprint(review.publication_error),
         tone: 'danger',
         label: '发布失败',
         text: `${title} 发布失败${review.publication_error ? `：${review.publication_error}` : '，原因不可用'}。`,
@@ -148,8 +172,9 @@ function buildAlerts(
       })
     } else {
       const retryReason = review.publication_error || review.error
-      alerts.push({
+      push({
         id: `retry-${review.id}`,
+        fingerprint: retryFingerprint(retryReason),
         tone: 'warn',
         label: '发布重试中',
         text: `${title} ${review.status === 'failed' ? '执行失败，' : ''}发布正在重试${retryReason ? `：${retryReason}` : '。'}`,
@@ -163,26 +188,35 @@ function buildAlerts(
   // loaded recent page are not missed; the first page plus hasNextPage is
   // enough to show "N+". Failed or skipped nodes have no server-side filter,
   // so they stay client-side over the loaded recent reviews and the alert
-  // states that scope.
+  // states that scope. Aggregate alerts store a finished_at watermark: after
+  // an ack they count only hits that finished later.
   const completed = reviews.filter((item): item is ReviewSummary => 'status' in item && item.status === 'completed')
   const nodeIssues = completed.filter((item) => item.verdict !== 'INCOMPLETE'
     && (item.nodes || []).some((node) => node.status === 'failed' || node.status === 'skipped'))
-  if (incomplete.count) {
+  if (incomplete.items.length) {
+    const stored = acks.get('reviews-incomplete')
+    const state = aggregateAckState(incomplete.items, incomplete.hasMore, stored)
     alerts.push({
       id: 'reviews-incomplete',
+      fingerprint: watermarkFingerprint(incomplete.items, stored),
+      acked: state.acked,
       tone: 'warn',
       label: '评审未完成',
-      text: `${incomplete.count}${incomplete.hasMore ? '+' : ''} 个已结束评审为 INCOMPLETE（未完成）：存在未解决的证据缺口或未执行节点，零 Finding 不代表没有问题。`,
+      text: `${state.sinceAck ? '自上次已读后新增 ' : ''}${state.count}${state.plus ? '+' : ''} 个已结束评审为 INCOMPLETE（未完成）：存在未解决的证据缺口或未执行节点，零 Finding 不代表没有问题。`,
       href: '/reviews?verdict=INCOMPLETE',
       action: '查看 INCOMPLETE 评审',
     })
   }
   if (nodeIssues.length) {
+    const stored = acks.get('reviews-node-issues')
+    const state = aggregateAckState(nodeIssues, false, stored)
     alerts.push({
       id: 'reviews-node-issues',
+      fingerprint: watermarkFingerprint(nodeIssues, stored),
+      acked: state.acked,
       tone: 'warn',
       label: '评审节点异常',
-      text: `${nodeIssues.length} 个已结束评审包含失败或跳过的节点，结果可能不完整（按最近 ${reviews.length} 条评审统计）。`,
+      text: `${state.sinceAck ? '自上次已读后新增 ' : ''}${state.count} 个已结束评审包含失败或跳过的节点，结果可能不完整（按最近 ${reviews.length} 条评审统计）。`,
       href: '/reviews?status=completed',
       action: '查看评审',
     })
@@ -316,6 +350,13 @@ export function OverviewPage() {
     queryKey: ['stats', 'overview', range.from, range.to],
     queryFn: () => getStats(range),
   })
+  // Acks are the caller's own read marks. Until they load no alert row is
+  // rendered; if they fail every alert is shown without ack buttons, so a
+  // failure can only show more, never hide an alert.
+  const acksQuery = useQuery({ queryKey: ALERT_ACKS_KEY, queryFn: listAlertAcks, retry: false })
+  const [showRead, setShowRead] = useState(false)
+  const [pendingAcks, setPendingAcks] = useState<ReadonlySet<string>>(() => new Set())
+  const alertIdPrefix = useId()
 
   const projectNames = useMemo(
     () => new Map(projectsPage.items.map((project) => [project.id, project.path_with_namespace])),
@@ -333,16 +374,52 @@ export function OverviewPage() {
     }
     return Array.from(issues.values())
   }, [failedRuns.items, failedPublications.items, pendingPublications.items])
+  const ackMap = useMemo<AlertAcks>(
+    () => new Map((acksQuery.data?.acks || []).map((ack) => [ack.key, ack.fingerprint])),
+    [acksQuery.data],
+  )
   const alerts = useMemo(
     () => buildAlerts(
       projectsPage.items,
       providersPage.data?.models || [],
       reviewIssues,
       recent.items,
-      { count: incompleteReviews.items.length, hasMore: incompleteReviews.hasNextPage },
+      { items: incompleteReviews.items, hasMore: incompleteReviews.hasNextPage },
+      ackMap,
     ),
-    [projectsPage.items, providersPage.data, reviewIssues, recent.items, incompleteReviews.items.length, incompleteReviews.hasNextPage],
+    [projectsPage.items, providersPage.data, reviewIssues, recent.items, incompleteReviews.items, incompleteReviews.hasNextPage, ackMap],
   )
+  const acksSettled = !acksQuery.isPending
+  const acksReady = acksQuery.isSuccess
+  const unreadCount = alerts.filter((alert) => !alert.acked).length
+  const readCount = alerts.length - unreadCount
+  const showingRead = showRead && readCount > 0
+  const visibleAlerts = acksSettled ? alerts.filter((alert) => !alert.acked || showingRead) : []
+  const writeAck = async (alert: Alert, acked: boolean) => {
+    setPendingAcks((current) => new Set(current).add(alert.id))
+    try {
+      if (acked) {
+        const saved = await putAlertAck(alert.id, alert.fingerprint)
+        queryClient.setQueryData<AlertAckList>(ALERT_ACKS_KEY, (current) => ({
+          acks: [saved, ...(current?.acks || []).filter((ack) => ack.key !== saved.key)],
+        }))
+      } else {
+        await deleteAlertAck(alert.id)
+        queryClient.setQueryData<AlertAckList>(ALERT_ACKS_KEY, (current) => ({
+          acks: (current?.acks || []).filter((ack) => ack.key !== alert.id),
+        }))
+        if (readCount <= 1) setShowRead(false)
+      }
+    } catch (error) {
+      toast.push('error', `${acked ? '标记已读' : '撤销已读'}失败：${errorMessage(error)}`)
+    } finally {
+      setPendingAcks((current) => {
+        const next = new Set(current)
+        next.delete(alert.id)
+        return next
+      })
+    }
+  }
   const issuesError = projectsPage.error || failedRuns.error || failedPublications.error
     || pendingPublications.error || incompleteReviews.error || (providersEnabled ? providersPage.error : null)
   const hasIssuesError = projectsPage.isError || failedRuns.isError || failedPublications.isError
@@ -424,7 +501,19 @@ export function OverviewPage() {
           onRetry={() => { void stats.refetch() }}
         />
 
-          <Panel flush title="告警" aside={<><span>检查范围：token 过期、工作区异常、停用项目{providersEnabled ? '、provider 错误' : ''}、评审执行失败和发布失败、已完成但未完成（服务端计数）或含失败/跳过节点（按最近加载的评审计数）的评审</span>{alerts.length ? <span>{alerts.length}{hasMoreIssues ? '+' : ''} 项</span> : null}</>}>
+          <Panel
+            flush
+            title="告警"
+            aside={(
+              <>
+                <span>检查范围：token 过期、工作区异常、停用项目{providersEnabled ? '、provider 错误' : ''}、评审执行失败和发布失败、已完成但未完成（服务端计数）或含失败/跳过节点（按最近加载的评审计数）的评审</span>
+                {acksSettled && unreadCount ? <span>{unreadCount}{hasMoreIssues ? '+' : ''} 项</span> : null}
+                {acksReady && readCount ? (
+                  <Button variant="ghost" size="sm" aria-pressed={showingRead} onClick={() => setShowRead(!showingRead)}>显示已读（{readCount}）</Button>
+                ) : null}
+              </>
+            )}
+          >
             {hasIssuesError ? (
               <div className={overview.state}>
                 <ErrorState
@@ -439,19 +528,42 @@ export function OverviewPage() {
                 />
               </div>
             ) : null}
-            {alerts.length === 0 && !issuesPending && !hasIssuesError && !hasMoreIssues ? (
+            {acksQuery.isError ? (
+              <p role="status" className={overview.ackNotice}>已读记录加载失败，暂时显示全部告警，不能标记已读。</p>
+            ) : null}
+            {acksSettled && !issuesPending && !hasIssuesError && !hasMoreIssues && alerts.length === 0 ? (
               <p className={overview.compactState}>无异常</p>
             ) : null}
-            {issuesPending ? <div className={overview.state}><LoadingState label={pausedIssues ? '等待网络连接以继续异常检查…' : undefined} /></div> : null}
-            {alerts.map((alert) => (
-              <div key={alert.id} className={overview.alert}>
-                <Badge tone={alert.tone}>{alert.label}</Badge>
-                <div className={overview.alertBody}>
-                  <span>{alert.text}</span>
-                  <Link to={alert.href} className={overview.alertAction}>{alert.action}</Link>
+            {acksSettled && !issuesPending && !hasIssuesError && !hasMoreIssues && alerts.length > 0 && unreadCount === 0 && !showingRead ? (
+              <p className={overview.compactState}>无未读告警</p>
+            ) : null}
+            {issuesPending || !acksSettled ? <div className={overview.state}><LoadingState label={pausedIssues ? '等待网络连接以继续异常检查…' : undefined} /></div> : null}
+            {visibleAlerts.map((alert) => {
+              const textId = `${alertIdPrefix}-${alert.id}`
+              const ackable = acksReady && ALERT_KEY_PATTERN.test(alert.id)
+              return (
+                <div key={alert.id} className={classNames(overview.alert, alert.acked && overview.alertRead)}>
+                  <Badge tone={alert.tone}>{alert.label}</Badge>
+                  <div className={overview.alertBody}>
+                    <span id={textId}>{alert.text}</span>
+                    <Link to={alert.href} className={overview.alertAction}>{alert.action}</Link>
+                  </div>
+                  {ackable ? (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className={overview.alertAck}
+                      loading={pendingAcks.has(alert.id)}
+                      aria-label={`${alert.acked ? '撤销已读' : '标记已读'}：${alert.label}`}
+                      aria-describedby={textId}
+                      onClick={() => { void writeAck(alert, !alert.acked) }}
+                    >
+                      {alert.acked ? '撤销已读' : '已读'}
+                    </Button>
+                  ) : null}
                 </div>
-              </div>
-            ))}
+              )
+            })}
             {hasMoreIssues ? (
               <div className={overview.panelFooter}>
                 {projectsPage.hasNextPage ? (

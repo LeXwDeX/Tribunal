@@ -153,6 +153,24 @@
   white-space: nowrap;
 }
 
+/* The ack button keeps its size; the body text wraps beside it. */
+.alertAck {
+  flex: none;
+  align-self: flex-start;
+}
+
+.alertRead .alertBody {
+  color: var(--muted-strong);
+}
+
+.ackNotice {
+  margin: 0;
+  padding: var(--space-sm) var(--space-lg);
+  border-bottom: 1px solid var(--border);
+  color: var(--muted-strong);
+  font-size: var(--fs-body-sm);
+}
+
 .panelFooter {
   display: flex;
   flex-wrap: wrap;
