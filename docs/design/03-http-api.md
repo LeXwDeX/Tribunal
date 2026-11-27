@@ -107,8 +107,11 @@ Note Hook 先入队 `review.command`，由 worker 请求 GitLab 校验身份、M
 | POST | `/api/v1/api-tokens` | `{name, expires_in_days}` → `{id, token}`，明文只返回这一次 |
 | POST | `/api/v1/api-tokens/{id}/renew` | 浏览器会话 + CSRF：`{expires_in_days}`（1–365，默认 90）→ `{id, token}`；同名轮换明文，旧明文立即失效，只能操作本人的 token |
 | DELETE | `/api/v1/api-tokens/{id}` | 吊销 |
+| GET | `/api/v1/alert-acks` | 浏览器会话：当前用户的全部告警已读记录 `{acks: [{key, fingerprint, acked_at}]}`，不分页（每人最多 1000 条） |
+| PUT | `/api/v1/alert-acks/{key}` | 浏览器会话 + CSRF：`{fingerprint}` → `200` 返回 `{key, fingerprint, acked_at}`；幂等，后写覆盖；`acked_at` 取服务端时间；超出 1000 条时淘汰最旧记录 |
+| DELETE | `/api/v1/alert-acks/{key}` | 浏览器会话 + CSRF：撤销已读，记录不存在也返回 `204` |
 
-浏览器导航请求（`Accept: text/html`）的登录和回调失败会以 303 跳回控制台，查询参数 `auth_error` 使用固定代码（`oauth_disabled`、`oauth_denied`、`oauth_state`、`oauth_forbidden`、`oauth_failed`）；API 客户端仍收到原有 JSON 错误。`/auth/login` 的 `return_to` 必须是同源路径，写入签名 OAuth state；`/auth/callback` 再次做同源校验（拒绝协议相对 URL、反斜杠、带 scheme/host 和 `/auth/*` 目标）后跳回原深链。`api-tokens` 接口都要求浏览器会话；静态 bootstrap Bearer 和其他 bearer 客户端不能创建、列出、续期或删除用户 token。新 token 的 `expires_in_days` 默认 90，范围 1–365；历史无过期时间的 token 可继续使用到撤销。续期按原名称轮换明文并立即失效旧明文，明文只返回这一次。过期 API token 的请求返回 401 `token_expired`；未知或已吊销的 Bearer 凭据仍返回 `unauthenticated`。普通用户只能管理自己的 token，不能停用账号或撤销他人凭据。`/api/v1/me` 只返回平台标签与 `global_read`，不返回逐项目授权；项目访问角色由项目或评审响应中的 `access` 字段给出。
+浏览器导航请求（`Accept: text/html`）的登录和回调失败会以 303 跳回控制台，查询参数 `auth_error` 使用固定代码（`oauth_disabled`、`oauth_denied`、`oauth_state`、`oauth_forbidden`、`oauth_failed`）；API 客户端仍收到原有 JSON 错误。`/auth/login` 的 `return_to` 必须是同源路径，写入签名 OAuth state；`/auth/callback` 再次做同源校验（拒绝协议相对 URL、反斜杠、带 scheme/host 和 `/auth/*` 目标）后跳回原深链。`api-tokens` 接口都要求浏览器会话；静态 bootstrap Bearer 和其他 bearer 客户端不能创建、列出、续期或删除用户 token。新 token 的 `expires_in_days` 默认 90，范围 1–365；历史无过期时间的 token 可继续使用到撤销。续期按原名称轮换明文并立即失效旧明文，明文只返回这一次。过期 API token 的请求返回 401 `token_expired`；未知或已吊销的 Bearer 凭据仍返回 `unauthenticated`。普通用户只能管理自己的 token，不能停用账号或撤销他人凭据。`alert-acks` 接口同样只接受浏览器会话：静态 bootstrap Bearer 与用户 API token 一律返回 403 `forbidden`，写请求缺少或带错 CSRF token 返回 403 `csrf_invalid`。`key` 须匹配 `^[A-Za-z0-9._:-]{1,128}$`，`fingerprint` 须为 1–256 字节的可打印 ASCII，请求体上限 4 KiB、拒绝未知字段，不合法时返回 400 `validation_failed`（错误只指明字段，不回显输入）。服务端不解释 `key`，也不据此查询项目或评审；每个请求只读写调用者本人的记录，响应只含调用者自己的数据。`/api/v1/me` 只返回平台标签与 `global_read`，不返回逐项目授权；项目访问角色由项目或评审响应中的 `access` 字段给出。
 
 ---
 
