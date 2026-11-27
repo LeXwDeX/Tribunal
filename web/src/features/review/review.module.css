@@ -130,7 +130,7 @@
 }
 
 .verdictMark b {
-  font: var(--fw-bold) 22px/1.1 var(--font-mono);
+  font: var(--fw-bold) var(--fs-h2)/1.1 var(--font-mono);
   color: var(--danger-fg);
   white-space: nowrap;
 }
