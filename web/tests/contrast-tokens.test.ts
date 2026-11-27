@@ -5,9 +5,10 @@ import { resolve } from 'node:path'
 // Colour contrast of the design tokens (#657). jsdom cannot paint, so axe's
 // color-contrast rule is disabled in tests/a11y-axe.test.tsx; this file checks
 // the same WCAG 2.1 AA thresholds on the token pairs the components use:
-// 4.5:1 for text (1.4.3), 3:1 for large text and for the non-text parts that
-// identify a control or its state (1.4.11). The light palette is :root, the
-// dark palette is :root[data-theme="dark"] over the light values.
+// 4.5:1 for text (1.4.3) and 3:1 for the non-text parts that identify a
+// control or its state (1.4.11). No pair relies on the 3:1 large-text
+// allowance. The light palette is :root, the dark palette is
+// :root[data-theme="dark"] over the light values.
 
 type Rgba = [number, number, number, number]
 
@@ -89,12 +90,12 @@ const TEXT_PAIRS: Array<[string, string]> = [
   ['on-accent', 'accent'], ['accent', 'surface'], ['accent', 'accent-soft'],
   ['on-danger-solid', 'danger-solid'], ['on-danger-solid', 'danger-solid-hover'],
   ['ok-fg', 'ok-bg'], ['warn-fg', 'warn-bg'], ['danger-fg', 'danger-bg'], ['info-fg', 'info-bg'], ['neutral-fg', 'neutral-bg'],
-  ['danger-fg', 'surface'], ['code-fg', 'code-bg'],
+  ['code-fg', 'code-bg'],
+  // Status text on the plain surface, including the verdict mark: it is 18px
+  // at weight 600, below WCAG large text (24px, or 18.66px bold), so it needs 4.5:1.
+  ...['ok-fg', 'warn-fg', 'danger-fg', 'info-fg'].map((fg): [string, string] => [fg, 'surface']),
 ]
 
-// Large text: the verdict mark is 18px bold in the status colours.
-const LARGE_TEXT_PAIRS: Array<[string, string]> = ['ok-fg', 'warn-fg', 'danger-fg', 'info-fg']
-  .map((fg): [string, string] => [fg, 'surface'])
 
 // Non-text: control outlines (inputs, selects, checkboxes, secondary buttons,
 // the calendar's today mark), the focus outline and input focus border
@@ -119,10 +120,6 @@ describe('contrast helpers', () => {
 describe.each(Object.entries(THEMES))('%s theme token contrast (#657)', (_name, theme) => {
   it.each(TEXT_PAIRS)('text --%s on --%s is at least 4.5:1', (fg, bg) => {
     expect(tokenContrast(theme, fg, bg)).toBeGreaterThanOrEqual(4.5)
-  })
-
-  it.each(LARGE_TEXT_PAIRS)('large text --%s on --%s is at least 3:1', (fg, bg) => {
-    expect(tokenContrast(theme, fg, bg)).toBeGreaterThanOrEqual(3)
   })
 
   it.each(NON_TEXT_PAIRS)('non-text --%s on --%s is at least 3:1', (fg, bg) => {

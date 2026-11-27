@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { screen } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { Route, Routes } from 'react-router-dom'
 import axe from 'axe-core'
@@ -47,6 +47,16 @@ const completed = review({
   finished_at: '2026-10-22T05:12:00Z',
 })
 const running = review()
+const settingsProject = project({
+  settings: {
+    language: 'zh-CN',
+    skip_draft: true,
+    target_branches: ['main', 'release/*'],
+    labels_exclude: ['no-review'],
+    commit_status: true,
+    custom_rules: ['禁止在 handler 中直接访问数据库'],
+  },
+})
 const userModel = {
   id: 'user:aaaaaaaa-1111', display_name: '评审模型', source: 'user', read_only: false,
   protocol: 'openai-chat', base_url: 'https://example.com/v1', model: 'm',
@@ -79,14 +89,20 @@ function routes(url: string, init?: RequestInit) {
       trend: [{ day: '2026-10-21', runs: 5, duration_samples: 5, avg_duration_ms: 60000, p95_duration_ms: 90000 }],
     })
   }
+  if (path === '/api/v1/stats/reviews') {
+    return jsonResponse({
+      runs: 9, completed: 8, incomplete: 1, blocking: 2, failed: 1, cancelled: 0,
+      blocking_ratio: 0.25, incomplete_ratio: 0.11, all_runs: 12, all_blocking: 2, all_blocking_ratio: 0.17,
+    })
+  }
   if (path === `/api/v1/reviews/${completed.id}`) return jsonResponse(completed)
   if (path === `/api/v1/reviews/${completed.id}/graph`) return jsonResponse({ nodes, edges })
   if (path === `/api/v1/reviews/${completed.id}/findings`) {
     return jsonResponse({ findings: [finding(), finding({ id: 'f2', severity: 'P2', title: '错误未包装', decision: 'drop' })] })
   }
   if (path === '/api/v1/reviews') return jsonResponse({ reviews: [completed, running] })
-  if (path === '/api/v1/projects/42') return jsonResponse(project())
-  if (path.startsWith('/api/v1/projects/42/')) return jsonResponse({})
+  // The settings tab renders from the project record alone (no sub-API).
+  if (path === '/api/v1/projects/42') return jsonResponse(settingsProject)
   if (path === '/api/v1/projects') return jsonResponse({ projects: [project(), project({ id: 43, path_with_namespace: 'group/web', enabled: false })] })
   if (path === '/api/v1/profiles') return jsonResponse({ profiles: [{ name: 'default' }] })
   if (path === '/api/v1/models') return jsonResponse({ models: [userModel] })
@@ -95,8 +111,14 @@ function routes(url: string, init?: RequestInit) {
   if (path === '/api/v1/skills') return jsonResponse({ skills: [skill()] })
   if (path === '/api/v1/block-bindings') return jsonResponse({ bindings: [] })
   if (path === '/api/v1/providers') return jsonResponse({ providers: [] })
-  if (path === '/api/v1/api-tokens') return jsonResponse({ tokens: [] })
-  if (path === '/api/v1/admin/users') return jsonResponse({ users: [] })
+  if (path === '/api/v1/api-tokens') {
+    return jsonResponse({ tokens: [{ id: 1, name: 'ci-token', created_at: '2026-10-01T00:00:00Z', expires_at: '2027-10-01T00:00:00Z' }] })
+  }
+  if (path === '/api/v1/admin/users') {
+    return jsonResponse({ users: [
+      { id: 1, username: 'alice', disabled: false, revision: 1, role: 'admin', role_source: 'config', global_read: true, grant_count: 3 },
+    ] })
+  }
   return jsonResponse({})
 }
 
@@ -123,8 +145,17 @@ async function seriousViolations() {
     }))
 }
 
+// Waits until a metric shows the value from the mocked payload: the label
+// renders before the data arrives, with an "unavailable" placeholder.
+async function metricValue(label: string, value: string) {
+  await waitFor(() => {
+    const metric = screen.getAllByText(label).map((element) => element.parentElement).find((parent) => parent && within(parent).queryByText(value))
+    expect(metric).toBeTruthy()
+  })
+}
+
 const PAGES: Array<{ name: string; route: string; path: string; page: React.ReactNode; ready: () => Promise<unknown> }> = [
-  { name: '总览', route: '/', path: '/', page: <OverviewPage />, ready: () => screen.findByText('运行次数') },
+  { name: '总览', route: '/', path: '/', page: <OverviewPage />, ready: () => metricValue('运行次数', '12') },
   { name: '评审列表', route: '/reviews', path: '/reviews', page: <ReviewsPage />, ready: () => screen.findAllByText('feat: 支持批量导入') },
   {
     name: '评审详情',
@@ -139,12 +170,22 @@ const PAGES: Array<{ name: string; route: string; path: string; page: React.Reac
     route: '/projects/42/settings',
     path: '/projects/:id/:tab?',
     page: <ProjectDetailPage />,
-    ready: () => screen.findAllByText('group/backend'),
+    ready: () => screen.findByDisplayValue('main, release/*'),
   },
   { name: '扩展', route: '/extensions', path: '/extensions/:tab?', page: <ExtensionsPage />, ready: () => screen.findAllByText(mcpServer().name) },
   { name: '模型与档位', route: '/models', path: '/models', page: <ModelsPage />, ready: () => screen.findAllByText('评审模型') },
-  { name: '统计与反馈', route: '/statistics', path: '/statistics', page: <StatisticsPage />, ready: () => screen.findAllByRole('heading', { name: '统计与反馈' }) },
-  { name: '系统', route: '/system', path: '/system', page: <SystemPage />, ready: () => screen.findAllByRole('heading', { name: '系统' }) },
+  {
+    name: '统计与反馈',
+    route: '/statistics',
+    path: '/statistics',
+    page: <StatisticsPage />,
+    ready: async () => {
+      await metricValue('运行次数', '12')
+      await metricValue('评审运行', '9')
+      await screen.findByRole('img', { name: /每日运行次数柱状图，共 1 个/ })
+    },
+  },
+  { name: '系统', route: '/system', path: '/system', page: <SystemPage />, ready: () => screen.findByText('ci-token') },
 ]
 
 // jsdom implements neither of these; axe probes a canvas for icon ligatures

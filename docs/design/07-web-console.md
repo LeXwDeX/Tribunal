@@ -199,16 +199,6 @@ web/
 
 例外：移动端原生日期滚轮、滚动条、密码管理器、textarea resize、焦点与选区仍保留浏览器行为；这些原语不新增 npm 依赖。
 
-### 4.4 字体、字号刻度、触控尺寸与无障碍检查
-
-- **字体打包**：`web/src/styles/fonts.css`（由 `web/src/main.tsx` 引入）手写 `@font-face`，直接引用 `@fontsource/ibm-plex-sans` 与 `@fontsource/jetbrains-mono` 包内的 latin 子集 woff2 文件，`unicode-range` 与 Fontsource 的 latin 子集一致。字重只取样式实际用到的 400（`--fw-regular`）、500（`--fw-medium`、`--fw-semibold`）和 600（`--fw-bold`），共 6 个 woff2 文件，构建时打进 `web/dist`，不请求外部字体服务；不打包 woff 回退文件，控制台支持的浏览器都能读取 woff2。每个 `@font-face` 都设置 `font-display: swap`，字体加载完成前先用回退字体显示文字。中文字形不打包，按 `--font-sans` 字体栈回退到系统中文字体。字体许可证为 SIL OFL 1.1，两个包仍是 npm 生产依赖，由 `scripts/licensebundle` 写入 `licenses/THIRD_PARTY_NOTICES.txt`。`web/tests/fonts-657.test.ts` 检查字体声明，并确认 `web/dist` 里只有 woff2。
-- **字号刻度**：`npm run check:styles`（`web/scripts/stylecheck.mjs`）每次运行都从 `web/src/styles/tokens.css` 的 `--fs-*` 变量解析允许的字号，不再维护一份写死的列表，改 token 后守卫自动跟随。`font-size` 和 `font` 简写里的 px 字号不在刻度内时报 `font-scale` 错误；在刻度内但写成字面值时报 `scale-literal` 错误，并提示对应的 `var(--fs-*)`。`em`、`%`、`inherit` 等非 px 写法不受限制。
-- **触控尺寸**：视口宽度不超过 900px 时，`--control-h` 为 44px。日历（`DatePicker`）的日期格、翻月按钮和底部操作按钮都按 `--control-h` 设置宽高，可点区域不小于 44px。弹层按触控尺寸改为 340px 宽、最高 432px，四周内边距收窄为 8px，在 360px 宽的手机上也能完整放下七列 44px 的日期格。桌面尺寸不变（日期格 32px 高、弹层 292×360px）。`web/tests/controls-a11y-601.test.ts` 和 `web/tests/ui-controls.test.tsx` 锁定这套样式契约和弹层尺寸。
-- **控件描边**：`--control-border` 用于输入框、下拉、复选框、次要按钮和日历「今天」标记的描边，这些描边用来识别控件，在两套主题下对所有底色的对比度都不低于 3:1。`--border`、`--border-strong` 只用于分隔线和容器边缘，不受这条约束。
-- **axe 自动化**：`web/tests/a11y-axe.test.tsx` 在 jsdom 中用 `axe-core`（开发依赖）检查总览、评审列表、评审详情、项目列表、项目设置、注册项目对话框（校验通过状态）、扩展、模型与档位、统计与反馈、系统页面。页面都放在应用外壳里渲染并使用 mock 数据，亮色和暗色主题各跑一遍，出现 serious 或 critical 违规即失败；另有一项用例确认 axe 在 jsdom 中能报出违规，防止检查空转。唯一排除的规则是 `color-contrast`：jsdom 不做布局和绘制，axe 无法得到实际的前景色和背景色。
-- **颜色对比度**：`web/tests/contrast-tokens.test.ts` 解析 `tokens.css` 的亮色（`:root`）与暗色（`:root[data-theme="dark"]`）token，带透明度的颜色先叠加到所在底色上再计算 WCAG 对比度。正文、次级与弱化文字、链接、导航、按钮、徽标和代码文字不低于 4.5:1；大字（评审结论标记）不低于 3:1；控件描边、焦点轮廓与输入框聚焦边框（`--accent`）和状态圆点不低于 3:1。`--accent-ring` 是聚焦边框外侧的光晕，聚焦状态由 `--accent` 边框和轮廓标示，因此不单独校验。
-- 以上是 mock 数据和 token 层面的自动化检查，不代替真实部署环境下的目测验收。
-
 ### 4.3 表格规范
 
 控制台所有数据表都通过 `web/src/components/ui.tsx` 的 `DataTable` 渲染。页面不直接写 `<table>`，页面样式模块也不设置 `table`、`thead`、`tbody`、`tr`、`th`、`td` 元素选择器；列宽等差异用单元格（表头）上的 class 设置。
@@ -230,3 +220,13 @@ web/
 - **操作列**：放在最后一列并右对齐，`th` 与 `td` 都用 `tableCell.actions`，表头文字为「操作」。
 - **回归检查**：`web/tests/table-primitive.test.tsx` 随 `npm test` 运行，拒绝 `ui.tsx` 之外的 `<table>`、源码中残留的旧 `dataTable` / `tableWrap` 类、`styles/ui.module.css` 与 `styles/global.css` 以外样式里的 `table` / `thead` / `tbody` / `tr` / `th` / `td` 元素选择器，以及共享样式中 `.tableScroll` 上的 `max-height` 或内部纵向滚动、`th` / `td` 丢失 `vertical-align: middle`。
 - **视觉检查**：改动表格的页面，按 `AGENTS.md` §6 在 1440 与 390 宽度、亮色与暗色主题下检查。
+
+### 4.4 字体、字号刻度、触控尺寸与无障碍检查
+
+- **字体打包**：`web/src/styles/fonts.css`（由 `web/src/main.tsx` 引入）手写 `@font-face`，直接引用 `@fontsource/ibm-plex-sans` 与 `@fontsource/jetbrains-mono` 包内的 latin 子集 woff2 文件，`unicode-range` 沿用 Fontsource 的 latin 子集，但去掉 U+2000-206F（通用标点）：中文界面文字里的引号、破折号、省略号都在这个区段，必须和前后的中文一起用系统中文字体显示，否则会混入拉丁字体的字宽。字重只取样式实际用到的 400（`--fw-regular`）、500（`--fw-medium`、`--fw-semibold`）和 600（`--fw-bold`），共 6 个 woff2 文件，构建时打进 `web/dist`，不请求外部字体服务；不打包 woff 回退文件，控制台支持的浏览器都能读取 woff2。每个 `@font-face` 都设置 `font-display: swap`，字体加载完成前先用回退字体显示文字。中文字形不打包，按 `--font-sans` 字体栈回退到系统中文字体。字体许可证为 SIL OFL 1.1，两个包仍是 npm 生产依赖，由 `scripts/licensebundle` 写入 `licenses/THIRD_PARTY_NOTICES.txt`。`web/tests/fonts-657.test.ts` 检查字体声明，并确认 `web/dist` 里只有 woff2。
+- **字号刻度**：`npm run check:styles`（`web/scripts/stylecheck.mjs`）每次运行都从 `web/src/styles/tokens.css` 的 `--fs-*` 变量解析允许的字号，不再维护一份写死的列表，改 token 后守卫自动跟随。`font-size` 和 `font` 简写里的 px 字号不在刻度内时报 `font-scale` 错误；在刻度内但写成字面值时报 `scale-literal` 错误，并提示对应的 `var(--fs-*)`。`em`、`%`、`inherit` 等非 px 写法不受限制。
+- **触控尺寸**：视口宽度不超过 900px 时，`--control-h` 为 44px。日历（`DatePicker`）的日期格、翻月按钮和底部操作按钮都按 `--control-h` 设置宽高，可点区域不小于 44px。弹层按触控尺寸改为 340px 宽、最高 432px，四周内边距收窄为 8px，视口不窄于 360px 时能完整放下七列 44px 的日期格。视口窄于 360px 时，弹层宽度为视口宽度减 16px（320px 宽的手机上为 304px），此时日期格之间不留间隙、内边距收窄为 4px，日期格改为平分列宽，每列不小于 40px，高度仍为 44px。日历打开期间会监听这个断点，旋转屏幕或调整窗口跨过 900px 时，弹层随之换成对应尺寸。桌面尺寸不变（日期格 32px 高、弹层 292×360px）。`web/tests/controls-a11y-601.test.ts` 和 `web/tests/ui-controls.test.tsx` 锁定这套样式契约、弹层尺寸和断点切换。
+- **控件描边**：`--control-border` 用于输入框、下拉、复选框、次要按钮和日历「今天」标记的描边，这些描边用来识别控件，在两套主题下对所有底色的对比度都不低于 3:1。`--border`、`--border-strong` 只用于分隔线和容器边缘，不受这条约束。
+- **axe 自动化**：`web/tests/a11y-axe.test.tsx` 在 jsdom 中用 `axe-core`（开发依赖）检查总览、评审列表、评审详情、项目列表、项目设置、注册项目对话框（校验通过状态）、扩展、模型与档位、统计与反馈、系统页面。页面都放在应用外壳里渲染并使用 mock 数据，亮色和暗色主题各跑一遍，出现 serious 或 critical 违规即失败；另有一项用例确认 axe 在 jsdom 中能报出违规，防止检查空转。唯一排除的规则是 `color-contrast`：jsdom 不做布局和绘制，axe 无法得到实际的前景色和背景色。
+- **颜色对比度**：`web/tests/contrast-tokens.test.ts` 解析 `tokens.css` 的亮色（`:root`）与暗色（`:root[data-theme="dark"]`）token，带透明度的颜色先叠加到所在底色上再计算 WCAG 对比度。正文、次级与弱化文字、链接、导航、按钮、徽标、代码文字和状态色文字不低于 4.5:1。评审结论标记是 18px、字重 600，达不到 WCAG 大字的标准（24px，或粗体 18.66px），因此也按 4.5:1 校验，测试中没有任何组合使用大字的 3:1 放宽。控件描边、焦点轮廓、输入框聚焦边框（`--accent`）和状态圆点不低于 3:1。`--accent-ring` 是聚焦边框外侧的光晕，聚焦状态由 `--accent` 边框和轮廓标示，因此不单独校验。
+- 以上是 mock 数据和 token 层面的自动化检查，不代替真实部署环境下的目测验收。

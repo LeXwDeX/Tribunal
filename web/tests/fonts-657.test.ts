@@ -24,6 +24,12 @@ function firstFamily(token: string): string {
   return value[1]
 }
 
+// Fontsource's latin range minus U+2000-206F (General Punctuation). Chinese UI
+// text uses those marks (“ ” ‘ ’ — …); served from Plex they would mix Latin
+// widths into CJK lines, so they fall through to the system CJK font instead.
+const LATIN_RANGE = 'U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, '
+  + 'U+0329, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD'
+
 describe('self-hosted fonts (#657)', () => {
   it('declares the first family of each font stack at 400, 500 and 600', () => {
     const declared = faces.map((face) => `${face.get('font-family')} ${face.get('font-weight')}`).sort()
@@ -41,7 +47,7 @@ describe('self-hosted fonts (#657)', () => {
       expect(existsSync(resolve(root, 'node_modules', urls[0]))).toBe(true)
       expect(face.get('font-display')).toBe('swap')
       expect(face.get('font-style')).toBe('normal')
-      expect(face.get('unicode-range')).toMatch(/^U\+0000-00FF,/)
+      expect(face.get('unicode-range')).toBe(LATIN_RANGE)
     }
   })
 
@@ -53,5 +59,6 @@ describe('self-hosted fonts (#657)', () => {
       .map((name) => readFileSync(resolve(root, 'dist/assets', name), 'utf8')).join('\n')
     expect(css.match(/@font-face/g)).toHaveLength(6)
     expect(css).not.toMatch(/\.woff\)/)
+    expect(css).not.toContain('U+2000-206F')
   })
 })
