@@ -221,3 +221,57 @@ func TestAlertAckPutRejectsUnknownUser(t *testing.T) {
 		t.Fatal("PutAlertAck for user 0 succeeded")
 	}
 }
+
+func TestAlertAckPutKeepsNewRowWhenClockStepsBack(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	s := openTestStore(t, clock)
+	alertAckUser(t, s, 7, "alice", clock.Now())
+	seedAlertAcks(t, s, 7, "seed", store.MaxAlertAcksPerUser, clock.Now(), time.Second)
+
+	// The clock steps back before every seeded row; the PUT stamps acked_at
+	// from the store clock and must not evict the row it returns.
+	clock.Advance(-time.Hour)
+	saved, err := s.PutAlertAck(ctx, 7, store.AlertAck{Key: "backwards", Fingerprint: "f"})
+	if err != nil {
+		t.Fatalf("PutAlertAck: %v", err)
+	}
+	if !saved.AckedAt.Equal(clock.Now()) {
+		t.Fatalf("acked_at = %v, want store clock %v", saved.AckedAt, clock.Now())
+	}
+	got := ackMap(t, s, 7)
+	if len(got) != store.MaxAlertAcksPerUser {
+		t.Fatalf("acks = %d, want %d", len(got), store.MaxAlertAcksPerUser)
+	}
+	if _, ok := got["backwards"]; !ok {
+		t.Fatal("PUT evicted the row it just returned")
+	}
+	if _, ok := got["seed-0000"]; ok {
+		t.Fatal("oldest other ack seed-0000 was not evicted")
+	}
+}
+
+func TestAlertAckEvictionMatchesListOrderOnTies(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	s := openTestStore(t, clock)
+	alertAckUser(t, s, 7, "alice", clock.Now())
+	tie := clock.Now()
+	seedAlertAcks(t, s, 7, "tie", store.MaxAlertAcksPerUser, tie, 0)
+	listed, err := s.ListAlertAcks(ctx, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The row listed last among equal acked_at values is the one evicted.
+	lastListed := listed[len(listed)-1].Key
+	if _, err := s.PutAlertAck(ctx, 7, store.AlertAck{Key: "newer", Fingerprint: "f", AckedAt: tie.Add(time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	got := ackMap(t, s, 7)
+	if _, ok := got[lastListed]; ok {
+		t.Fatalf("eviction kept %s, the last listed row; list and eviction order differ", lastListed)
+	}
+	if len(got) != store.MaxAlertAcksPerUser {
+		t.Fatalf("acks = %d, want %d", len(got), store.MaxAlertAcksPerUser)
+	}
+}
