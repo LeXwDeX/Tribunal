@@ -395,6 +395,9 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 			s.logger.Warn("project precheck denied", "reason", "project_lookup", "status", status)
 			return nil, registrationPrecheckDenied()
 		}
+		if sharedMode && status == http.StatusNotFound {
+			return nil, sharedBotProjectNotFoundError()
+		}
 		return nil, upstreamError(status)
 	}
 	if err := s.verifyProject(project, ref, false); err != nil {
@@ -692,6 +695,18 @@ func sharedBotAccessError() error {
 		Detail{Field: "shared_bot_access", Message: "the shared bot needs Reporter or higher on this project to read code and publish review notes"})
 }
 
+// sharedBotProjectNotFoundError explains a 404 from the shared bot's project
+// lookup to a trusted operator. GitLab hides a private project from a
+// non-member, so the address may be wrong or the bot may not be a member with
+// Reporter or higher (Guest, Minimal Access and a pending invitation do not
+// count). The code and upstream status stay gitlab_rejected / 404 for
+// compatibility; only the actionable detail is added.
+func sharedBotProjectNotFoundError() error {
+	err := upstreamError(http.StatusNotFound)
+	err.Details = []Detail{{Field: "shared_bot_access", Message: "the shared bot cannot see this project; check the project address and add the shared bot to the project with Reporter or higher (Guest, Minimal Access or a pending invitation is not enough)"}}
+	return err
+}
+
 // verifySharedRegistrantMembership checks the registrant's own GitLab id with
 // the shared bot's read access. The bot is never treated as the registrant, so
 // registering a project still requires a real Reporter+ membership.
@@ -916,6 +931,10 @@ func (s *ProjectService) Validate(ctx context.Context, in ValidateProjectInput) 
 			if !in.TrustedPlatformAdmin && gitlab.IsNotFound(err) {
 				s.logger.Warn("validation precheck denied", "reason", "project_lookup", "status", status)
 				return nil, registrationPrecheckDenied()
+			}
+			if gitlab.IsNotFound(err) {
+				s.logger.Warn("GitLab validation request failed", "operation", "get_project", "status", status)
+				return nil, sharedBotProjectNotFoundError()
 			}
 		}
 		return nil, s.validationUpstreamError(ctx, "get_project", err)
@@ -1697,6 +1716,13 @@ func webhookUpstreamError(status int, sharedCredential bool) error {
 			err.Details = []Detail{{Field: "provisioning_credential", Message: "managing project webhooks requires the provisioning credential to hold Maintainer on this project; grant the role or have a Maintainer manage the webhook in GitLab"}}
 		} else {
 			err.Details = []Detail{{Field: "access_level", Message: "managing project webhooks requires the Maintainer role; use a Maintainer token or have a Maintainer manage the webhook in GitLab"}}
+		}
+	case http.StatusNotFound:
+		// GitLab hides a private project from a non-member; in shared mode the
+		// project was already read by the shared bot, so the provisioning
+		// account's membership is the actionable cause.
+		if sharedCredential {
+			err.Details = []Detail{{Field: "provisioning_credential", Message: "the provisioning credential cannot see this project; add its account to the project with Maintainer or have a Maintainer manage the webhook in GitLab"}}
 		}
 	}
 	return err
