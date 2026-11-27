@@ -285,6 +285,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		ProfileOverrides: db,
 		Sessions:         db,
 		Tokens:           db,
+		AlertAcks:        db,
 		Access:           db,
 		Platform:         cfg,
 		FileConfig:       &config.State{Snapshot: snapshot, UpdatedAt: time.Now()},

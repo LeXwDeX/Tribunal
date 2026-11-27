@@ -98,6 +98,9 @@ type Config struct {
 	Sessions         SessionStore
 	Access           AccessStore
 	Platform         *config.Config
+	// AlertAcks stores per-user overview alert acks. When nil the server uses
+	// Tokens if it implements store.AlertAckStore; otherwise the routes answer 503.
+	AlertAcks store.AlertAckStore
 	// FileConfig is the file-effective display state loaded at startup. The
 	// watcher replaces it without touching Platform, which stays the runtime
 	// snapshot until the process restarts.
@@ -147,6 +150,7 @@ type Server struct {
 	refreshModels    func(context.Context) error
 	profileOverrides store.ProfileOverrideStore
 	tokens           TokenStore
+	alertAcks        store.AlertAckStore
 	access           AccessStore
 	platform         *config.Config
 	fileConfig       atomic.Pointer[config.State]
@@ -203,6 +207,10 @@ func New(cfg Config) (*Server, error) {
 	if bindings == nil {
 		bindings, _ = cfg.Tokens.(AdminBindingStore)
 	}
+	alertAcks := cfg.AlertAcks
+	if alertAcks == nil {
+		alertAcks, _ = cfg.Tokens.(store.AlertAckStore)
+	}
 	roles, _ := sessions.(PlatformRoleStore)
 	if roles == nil {
 		roles, _ = cfg.Tokens.(PlatformRoleStore)
@@ -233,6 +241,7 @@ func New(cfg Config) (*Server, error) {
 		refreshModels:    cfg.RefreshModels,
 		profileOverrides: cfg.ProfileOverrides,
 		tokens:           cfg.Tokens,
+		alertAcks:        alertAcks,
 		access:           cfg.Access,
 		platform:         cfg.Platform,
 		overlayWriter:    cfg.OverlayWriter,
@@ -375,6 +384,10 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("POST /api/v1/api-tokens", s.apiAuth(s.guard(policyAuthenticated, s.handleCreateAPIToken)))
 	mux.HandleFunc("POST /api/v1/api-tokens/{id}/renew", s.apiAuth(s.guard(policyAuthenticated, s.handleRenewAPIToken)))
 	mux.HandleFunc("DELETE /api/v1/api-tokens/{id}", s.apiAuth(s.guard(policyAuthenticated, s.handleDeleteAPIToken)))
+	// Overview alert acks (browser session only; CSRF still applies).
+	mux.HandleFunc("GET /api/v1/alert-acks", s.apiAuth(s.guard(policyAuthenticated, s.handleListAlertAcks)))
+	mux.HandleFunc("PUT /api/v1/alert-acks/{key}", s.apiAuth(s.guard(policyAuthenticated, s.handlePutAlertAck)))
+	mux.HandleFunc("DELETE /api/v1/alert-acks/{key}", s.apiAuth(s.guard(policyAuthenticated, s.handleDeleteAlertAck)))
 	// Access administration. The documented /admin surface and the /api/v1
 	// equivalent share handlers.
 	for _, prefix := range []string{"/admin", "/api/v1/admin"} {
