@@ -1717,6 +1717,13 @@ func webhookUpstreamError(status int, sharedCredential bool) error {
 		} else {
 			err.Details = []Detail{{Field: "access_level", Message: "managing project webhooks requires the Maintainer role; use a Maintainer token or have a Maintainer manage the webhook in GitLab"}}
 		}
+	case http.StatusNotFound:
+		// GitLab hides a private project from a non-member; in shared mode the
+		// project was already read by the shared bot, so the provisioning
+		// account's membership is the actionable cause.
+		if sharedCredential {
+			err.Details = []Detail{{Field: "provisioning_credential", Message: "the provisioning credential cannot see this project; add its account to the project with Maintainer or have a Maintainer manage the webhook in GitLab"}}
+		}
 	}
 	return err
 }

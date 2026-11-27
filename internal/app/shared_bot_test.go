@@ -1247,8 +1247,8 @@ func TestRegisterSharedCredentialTrustedAdminProjectNotFoundNamesSharedBot(t *te
 	})
 	assertAppError(t, err, "gitlab_rejected", "shared_bot_access")
 	var appErr *Error
-	if errors.As(err, &appErr) && appErr.Upstream != http.StatusNotFound {
-		t.Fatalf("upstream = %d, want 404", appErr.Upstream)
+	if !errors.As(err, &appErr) || appErr.Upstream != http.StatusNotFound {
+		t.Fatalf("error = %#v, want upstream 404", err)
 	}
 	assertRegisterResidueFree(t, ctx, st, api)
 }
@@ -1286,5 +1286,60 @@ func TestRegisterSharedCredentialNonTrustedProjectNotFoundStaysUnified(t *testin
 		if detail.Field == "shared_bot_access" {
 			t.Fatalf("non-trusted denial leaked shared bot detail: %+v", appErr.Details)
 		}
+	}
+}
+
+// A per-project token deployment keeps the bare upstream 404: the shared bot
+// is not involved, so naming it would mislead the operator.
+func TestRegisterPerProjectTokenTrustedProjectNotFoundDoesNotNameSharedBot(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	api.fakeGitLab.mu.Lock()
+	api.projectErr = &gitlab.Error{Op: "get_project", Status: http.StatusNotFound}
+	api.fakeGitLab.mu.Unlock()
+	service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
+
+	_, err := service.Register(ctx, RegisterInput{Project: "42", AccessToken: projectAccessTok, TrustedPlatformAdmin: true})
+	assertAppError(t, err, "gitlab_rejected", "")
+	var appErr *Error
+	if errors.As(err, &appErr) && len(appErr.Details) != 0 {
+		t.Fatalf("per-project token 404 details = %+v, want none", appErr.Details)
+	}
+}
+
+// The provisioning account may not be a member of a private project the shared
+// bot can read; GitLab then answers the hook creation with 404. The operator
+// must be pointed at the provisioning credential, not at the project address.
+func TestRegisterSharedCredentialWebhookNotFoundNamesProvisioningCredential(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	api.fakeGitLab.mu.Lock()
+	api.hookErr = &gitlab.Error{Op: "create_hook", Status: http.StatusNotFound}
+	api.fakeGitLab.mu.Unlock()
+	service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
+
+	_, err := service.Register(ctx, RegisterInput{Project: "42", OwnerUserID: registrantUserID, AutoWebhook: true, TrustedPlatformAdmin: true})
+	assertAppError(t, err, "gitlab_rejected", "provisioning_credential")
+	if _, err := st.GetProject(ctx, 42); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("project persisted after webhook failure: %v", err)
+	}
+}
+
+func TestValidateSharedCredentialNonTrustedProjectNotFoundStaysUnified(t *testing.T) {
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	api.fakeGitLab.mu.Lock()
+	api.projectErr = &gitlab.Error{Op: "get_project", Status: http.StatusNotFound}
+	api.fakeGitLab.mu.Unlock()
+	service := newSharedBotProjectService(t, openTestStore(t), api, sharedBotToken, nil)
+
+	_, err := service.Validate(context.Background(), ValidateProjectInput{Project: "42", OwnerUserID: registrantUserID})
+	var appErr *Error
+	if !errors.As(err, &appErr) || appErr.Code != "validation_failed" || appErr.Message != "project registration is not permitted" {
+		t.Fatalf("error = %#v, want unified precheck denial", err)
 	}
 }

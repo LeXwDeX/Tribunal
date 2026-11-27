@@ -186,6 +186,7 @@ function RegisterProjectDialog({ open, onClose }: { open: boolean; onClose: () =
     if (!canSave || pending) return
     setSaving(true)
     setError(null)
+    setValidationError(null)
     try {
       const settings: Record<string, unknown> = { skip_draft: skipDraft }
       const targets = branches.split(',').map((value) => value.trim()).filter(Boolean)

@@ -91,6 +91,57 @@ describe('registration error copy (#653)', () => {
     expect(unknown).toMatch(/req-9/)
   })
 
+  it('uses the real server strings for unconfigured and under-scoped platform credentials', () => {
+    expect(describeRegistrationError(apiError(400, 'validation_failed', 'shared bot credential is not configured', [
+      { field: 'shared_bot_credential', message: 'configure gitlab.bot_token_env and restart the service' },
+    ]))).toMatch(/未配置/)
+    expect(describeRegistrationError(apiError(400, 'validation_failed', 'provisioning credential scopes are insufficient', [
+      { field: 'provisioning_credential', message: 'api scope is required to manage webhooks' },
+    ]))).toMatch(/缺少 api scope/)
+  })
+
+  it('keeps an unmapped detail next to the mapped hints', () => {
+    const text = describeRegistrationError(apiError(400, 'validation_failed', 'invalid', [
+      { field: 'access_level', message: 'Reporter or higher is required to register this project' },
+      { field: 'something_new', message: 'raw detail' },
+    ]))
+    expect(text).toMatch(/Reporter/)
+    expect(text).toMatch(/raw detail/)
+  })
+
+  it('words the unified denial without assuming a shared bot', () => {
+    const text = describeRegistrationError(apiError(400, 'validation_failed', 'project registration is not permitted', [
+      { field: 'project', message: 'the project cannot be registered by this account' },
+    ]))
+    expect(text).toMatch(/访问 Key/)
+  })
+
+  it('points a webhook 404 at the provisioning account, not the project address', () => {
+    const text = describeRegistrationError(apiError(422, 'gitlab_rejected', 'GitLab rejected the request (status 404)', [
+      { field: 'provisioning_credential', message: 'the provisioning credential cannot see this project; add its account to the project with Maintainer or have a Maintainer manage the webhook in GitLab' },
+    ]))
+    expect(text).toMatch(/Webhook 凭据/)
+    expect(text).toMatch(/Maintainer/)
+    expect(text).not.toMatch(/仓库地址/)
+  })
+
+  it('leaves an unknown shared bot credential message untranslated', () => {
+    const error = apiError(400, 'validation_failed', 'x', [{ field: 'shared_bot_credential', message: 'something new' }])
+    expect(describeRegistrationField(error, { field: 'shared_bot_credential', message: 'something new' })).toBeNull()
+    expect(describeRegistrationField(error, { field: 'shared_bot_credential', message: 'must be active and not revoked' })).toMatch(/未激活或已撤销/)
+  })
+
+  it('maps the remaining token and rate-limit cases', () => {
+    const error = apiError(400, 'validation_failed', 'x')
+    expect(describeRegistrationField(error, { field: 'token.scopes', message: 'api scope is required' })).toMatch(/缺少 api scope/)
+    expect(describeRegistrationField(error, { field: 'token', message: 'must not be expired' })).toMatch(/已过期/)
+    expect(describeRegistrationField(error, { field: 'token', message: 'must not be empty' })).toMatch(/请填写访问 Key/)
+    expect(describeRegistrationError(apiError(422, 'gitlab_rejected', 'GitLab rejected the request (status 429)'))).toMatch(/限流/)
+    expect(describeRegistrationError(apiError(422, 'gitlab_rejected', 'GitLab rejected the request (status 403)', [
+      { field: 'access_level', message: 'managing project webhooks requires the Maintainer role; use a Maintainer token or have a Maintainer manage the webhook in GitLab' },
+    ]))).toMatch(/Maintainer/)
+  })
+
   it('leaves unrelated errors to the default rendering', () => {
     expect(describeRegistrationError(new Error('boom'))).toBeNull()
     expect(describeRegistrationError(apiError(403, 'forbidden', 'forbidden'))).toBeNull()
@@ -124,6 +175,7 @@ describe('registration error copy (#653)', () => {
     expect(await screen.findByText('校验失败')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '保存并初始化' }))
     const alert = (await screen.findByText('保存并初始化失败')).closest('[role="alert"]')
+    expect(screen.queryByText('校验失败')).not.toBeInTheDocument()
     expect(alert).not.toBeNull()
     expect(alert).toHaveTextContent(/平台 bot.*Reporter/)
     expect(alert).not.toHaveTextContent(/GitLab rejected|shared_bot_access/)
