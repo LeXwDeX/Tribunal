@@ -21,6 +21,7 @@
 | 数据 | TanStack Query（请求缓存与轮询）、原生 `EventSource`（SSE） | 评审详情页需要实时刷新 |
 | 路由 | TanStack Router 或 React Router | 二选一即可 |
 | 样式 | CSS Modules + CSS 变量（亮色 / 暗色两套 token） | 依赖少，不绑定组件库 |
+| 字体 | 自托管 IBM Plex Sans（400/500/600）与 JetBrains Mono（400/500/600）的 latin 子集，来自固定版本的 `@fontsource/*` 生产依赖 | 与设计稿一致，不依赖外部字体服务；中文回退系统字体 |
 | DAG 视图 | 自己按拓扑分层布局（列 = 层，行 = 节点），SVG 画连线 | 节点数 ≤ 30，不需要图布局库 |
 | 代码与 diff 展示 | `<pre>` + 行号；后续可换 Shiki | 首版够用 |
 | API 类型 | 从 Go 结构体生成 OpenAPI，再生成 TS 类型（可选） | 前后端字段一致 |
@@ -197,6 +198,16 @@ web/
 | `Disclosure` | 保留 `<details>` / `<summary>` 语义，隐藏原生 marker，使用自定义 chevron。 |
 
 例外：移动端原生日期滚轮、滚动条、密码管理器、textarea resize、焦点与选区仍保留浏览器行为；这些原语不新增 npm 依赖。
+
+### 4.4 字体、字号刻度、触控尺寸与无障碍检查
+
+- **字体打包**：`web/src/main.tsx` 只引入 `@fontsource/ibm-plex-sans` 与 `@fontsource/jetbrains-mono` 的 latin 子集，字重只取样式实际用到的 400（`--fw-regular`）、500（`--fw-medium`、`--fw-semibold`）和 600（`--fw-bold`），构建时打进 `web/dist`，不请求外部字体服务。Fontsource 的 `@font-face` 自带 `font-display: swap`，字体加载完成前先用回退字体显示文字。中文字形不打包，按 `--font-sans` 字体栈回退到系统中文字体。字体许可证为 SIL OFL 1.1，由 `scripts/licensebundle` 作为 npm 生产依赖写入 `licenses/THIRD_PARTY_NOTICES.txt`。
+- **字号刻度**：`npm run check:styles`（`web/scripts/stylecheck.mjs`）每次运行都从 `web/src/styles/tokens.css` 的 `--fs-*` 变量解析允许的字号，不再维护一份写死的列表，改 token 后守卫自动跟随。`font-size` 和 `font` 简写里的 px 字号不在刻度内时报 `font-scale` 错误；在刻度内但写成字面值时报 `scale-literal` 错误，并提示对应的 `var(--fs-*)`。`em`、`%`、`inherit` 等非 px 写法不受限制。
+- **触控尺寸**：视口宽度不超过 900px 时，`--control-h` 为 44px。日历（`DatePicker`）的日期格、翻月按钮和底部操作按钮都按 `--control-h` 设置宽高，可点区域不小于 44px。弹层按触控尺寸改为 340px 宽、最高 432px，四周内边距收窄为 8px，在 360px 宽的手机上也能完整放下七列 44px 的日期格。桌面尺寸不变（日期格 32px 高、弹层 292×360px）。`web/tests/controls-a11y-601.test.ts` 和 `web/tests/ui-controls.test.tsx` 锁定这套样式契约和弹层尺寸。
+- **控件描边**：`--control-border` 用于输入框、下拉、复选框、次要按钮和日历「今天」标记的描边，这些描边用来识别控件，在两套主题下对所有底色的对比度都不低于 3:1。`--border`、`--border-strong` 只用于分隔线和容器边缘，不受这条约束。
+- **axe 自动化**：`web/tests/a11y-axe.test.tsx` 在 jsdom 中用 `axe-core`（开发依赖）检查总览、评审列表、评审详情、项目列表、项目设置、注册项目对话框（校验通过状态）、扩展、模型与档位、统计与反馈、系统页面。页面都放在应用外壳里渲染并使用 mock 数据，亮色和暗色主题各跑一遍，出现 serious 或 critical 违规即失败；另有一项用例确认 axe 在 jsdom 中能报出违规，防止检查空转。唯一排除的规则是 `color-contrast`：jsdom 不做布局和绘制，axe 无法得到实际的前景色和背景色。
+- **颜色对比度**：`web/tests/contrast-tokens.test.ts` 解析 `tokens.css` 的亮色（`:root`）与暗色（`:root[data-theme="dark"]`）token，带透明度的颜色先叠加到所在底色上再计算 WCAG 对比度。正文、次级与弱化文字、链接、导航、按钮、徽标和代码文字不低于 4.5:1；大字（评审结论标记）不低于 3:1；控件描边、焦点轮廓与输入框聚焦边框（`--accent`）和状态圆点不低于 3:1。`--accent-ring` 是聚焦边框外侧的光晕，聚焦状态由 `--accent` 边框和轮廓标示，因此不单独校验。
+- 以上是 mock 数据和 token 层面的自动化检查，不代替真实部署环境下的目测验收。
 
 ### 4.3 表格规范
 

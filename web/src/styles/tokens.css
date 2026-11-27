@@ -58,7 +58,9 @@
   /* Opaque on purpose: these also paint dividers and tracks, where alpha would stack. */
   --border: #e7e7e9;
   --border-strong: #d4d4d8;
-  --control-border: #cfcfd4;
+  /* Input, select, checkbox and secondary button outlines identify the control,
+     so they keep 3:1 against every surface (WCAG 1.4.11); dividers above may stay light. */
+  --control-border: #8a8a90;
   /* Cyan marks live state, selection, focus and the current stage only. */
   --accent: #0e7490;
   --accent-hover: #0b5f76;
@@ -83,7 +85,7 @@
   --ok-dot: #16a34a;
   --warn-bg: #fbf3e3;
   --warn-fg: #8a5a00;
-  --warn-dot: #d48a06;
+  --warn-dot: #b87503;
   --danger-bg: #fdeeee;
   --danger-fg: #b91c1c;
   --danger-dot: #dc2626;
@@ -150,7 +152,7 @@
   --muted-strong: #a1a1a6;
   --border: #2a2a2c;
   --border-strong: #36363a;
-  --control-border: #3a3a3e;
+  --control-border: #707076;
   --accent: #5ac8d8;
   --accent-hover: #7fd6e3;
   --accent-soft: rgba(90, 200, 216, 0.12);

@@ -837,7 +837,8 @@
 }
 
 .calendarDayToday {
-  border-color: var(--border-strong);
+  /* The only visual mark for today, so it uses the 3:1 control outline. */
+  border-color: var(--control-border);
 }
 
 .calendarDaySelected {
