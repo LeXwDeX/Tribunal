@@ -171,16 +171,31 @@ func TestRegisterRejectsUntrustedReturnedURL(t *testing.T) {
 		func(context.Context, string, string) (string, error) {
 			return sha40, nil
 		})
-	_, err := service.Register(context.Background(), RegisterInput{
-		Project:     "group/repo",
-		AccessToken: "glpat-project-token",
-	})
+	for _, trusted := range []bool{false, true} {
+		_, err := service.Register(context.Background(), RegisterInput{
+			Project:              "group/repo",
+			AccessToken:          "glpat-project-token",
+			TrustedPlatformAdmin: trusted,
+		})
+		assertIdentityRejected(t, err, trusted)
+		if _, getErr := st.GetProject(context.Background(), 42); !errors.Is(getErr, store.ErrNotFound) {
+			t.Fatalf("untrusted project was stored: %v", getErr)
+		}
+	}
+}
+
+// assertIdentityRejected checks a failed project identity check: a trusted
+// operator sees the upstream rejection, anyone else the unified precheck
+// denial, which does not reveal that the credential can see the project.
+func assertIdentityRejected(t *testing.T, err error, trusted bool) {
+	t.Helper()
+	if !trusted {
+		assertUnifiedPrecheckDenial(t, err)
+		return
+	}
 	var appErr *Error
 	if !errors.As(err, &appErr) || appErr.Code != "gitlab_rejected" {
-		t.Fatalf("error = %#v, want gitlab_rejected", err)
-	}
-	if _, getErr := st.GetProject(context.Background(), 42); !errors.Is(getErr, store.ErrNotFound) {
-		t.Fatalf("untrusted project was stored: %v", getErr)
+		t.Fatalf("trusted error = %#v, want gitlab_rejected", err)
 	}
 }
 
@@ -222,19 +237,18 @@ func TestValidateRejectsUntrustedGitLabURLs(t *testing.T) {
 					probes++
 					return sha40, nil
 				})
-			_, err := service.Validate(context.Background(), ValidateProjectInput{
-				Project: "group/repo", AccessToken: "glpat-secret-token",
-			})
-			var appErr *Error
-			if !errors.As(err, &appErr) || appErr.Code != "gitlab_rejected" {
-				t.Fatalf("error = %#v, want gitlab_rejected", err)
-			}
-			if probes != 0 {
-				t.Fatalf("git probe ran %d times for untrusted metadata", probes)
-			}
-			for _, forbidden := range []string{"glpat-secret-token", "evil.example.com"} {
-				if strings.Contains(err.Error(), forbidden) {
-					t.Fatalf("error leaked %q: %v", forbidden, err)
+			for _, trusted := range []bool{false, true} {
+				_, err := service.Validate(context.Background(), ValidateProjectInput{
+					Project: "group/repo", AccessToken: "glpat-secret-token", TrustedPlatformAdmin: trusted,
+				})
+				assertIdentityRejected(t, err, trusted)
+				if probes != 0 {
+					t.Fatalf("git probe ran %d times for untrusted metadata", probes)
+				}
+				for _, forbidden := range []string{"glpat-secret-token", "evil.example.com"} {
+					if strings.Contains(err.Error(), forbidden) {
+						t.Fatalf("error leaked %q: %v", forbidden, err)
+					}
 				}
 			}
 		})
@@ -309,15 +323,14 @@ func TestValidateRejectsMismatchedProjectIdentity(t *testing.T) {
 			probes++
 			return sha40, nil
 		})
-	_, err := service.Validate(context.Background(), ValidateProjectInput{
-		Project: "42", AccessToken: "glpat-secret-token",
-	})
-	var appErr *Error
-	if !errors.As(err, &appErr) || appErr.Code != "gitlab_rejected" {
-		t.Fatalf("error = %#v, want gitlab_rejected", err)
-	}
-	if probes != 0 {
-		t.Fatal("mismatched project reached the Git probe")
+	for _, trusted := range []bool{false, true} {
+		_, err := service.Validate(context.Background(), ValidateProjectInput{
+			Project: "42", AccessToken: "glpat-secret-token", TrustedPlatformAdmin: trusted,
+		})
+		assertIdentityRejected(t, err, trusted)
+		if probes != 0 {
+			t.Fatal("mismatched project reached the Git probe")
+		}
 	}
 }
 

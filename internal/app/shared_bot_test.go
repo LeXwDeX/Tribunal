@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +30,7 @@ type sharedBotAPI struct {
 	users       map[string]*gitlab.User
 	userErrs    map[string]error
 	access      map[string]map[int64]int
+	accessErrs  map[string]map[int64]error
 	infoByToken map[string]*gitlab.TokenInfo
 	infoErrs    map[string]error
 	tokenUses   []string
@@ -41,6 +43,7 @@ func newSharedBotAPI() *sharedBotAPI {
 		users:       map[string]*gitlab.User{},
 		userErrs:    map[string]error{},
 		access:      map[string]map[int64]int{},
+		accessErrs:  map[string]map[int64]error{},
 		infoByToken: map[string]*gitlab.TokenInfo{},
 		infoErrs:    map[string]error{},
 		tokenUses:   []string{},
@@ -82,6 +85,16 @@ func (f *sharedBotAPI) setAccess(token string, userID int64, level int) {
 	f.access[token][userID] = level
 }
 
+// setAccessErr makes the member lookup for userID with token fail with err.
+func (f *sharedBotAPI) setAccessErr(token string, userID int64, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.accessErrs[token] == nil {
+		f.accessErrs[token] = map[int64]error{}
+	}
+	f.accessErrs[token][userID] = err
+}
+
 func (f *sharedBotAPI) GetProject(ctx context.Context, token, ref string) (*gitlab.Project, error) {
 	f.use("GetProject", token)
 	return f.fakeGitLab.GetProject(ctx, token, ref)
@@ -104,6 +117,9 @@ func (f *sharedBotAPI) GetMemberAccess(ctx context.Context, token string, projec
 	f.use("GetMemberAccess", token)
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.accessErrs[token][userID]; err != nil {
+		return 0, err
+	}
 	if levels := f.access[token]; levels != nil {
 		if level, ok := levels[userID]; ok {
 			return level, nil
@@ -620,7 +636,9 @@ func TestRegisterSharedCredentialMissingScopeRejectedBeforePersistence(t *testin
 	api.infoByToken[sharedBotToken] = &gitlab.TokenInfo{Scopes: []string{"api"}, Active: true}
 	service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
 
-	_, err := service.Register(ctx, RegisterInput{Project: "42", OwnerUserID: registrantUserID, AutoWebhook: true})
+	// A trusted operator sees the detailed field; a non-trusted caller gets the
+	// unified denial (see nonTrustedSharedPrecheckCases).
+	_, err := service.Register(ctx, RegisterInput{Project: "42", OwnerUserID: registrantUserID, AutoWebhook: true, TrustedPlatformAdmin: true})
 	assertAppError(t, err, "validation_failed", "shared_bot_credential")
 	assertRegisterResidueFree(t, ctx, st, api)
 	// Membership checks must not run once the credential itself is unusable.
@@ -641,7 +659,7 @@ func TestRegisterSharedCredentialExpiredRejectedBeforePersistence(t *testing.T) 
 	now := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
 	service := newSharedBotProjectService(t, st, api, sharedBotToken, func() time.Time { return now })
 
-	_, err := service.Register(ctx, RegisterInput{Project: "42", OwnerUserID: registrantUserID, AutoWebhook: true})
+	_, err := service.Register(ctx, RegisterInput{Project: "42", OwnerUserID: registrantUserID, AutoWebhook: true, TrustedPlatformAdmin: true})
 	assertAppError(t, err, "validation_failed", "shared_bot_credential")
 	assertRegisterResidueFree(t, ctx, st, api)
 }
@@ -842,7 +860,9 @@ func TestValidateSharedCredentialRejectsMissingScope(t *testing.T) {
 	api.infoByToken[sharedBotToken] = &gitlab.TokenInfo{Scopes: []string{"api"}, Active: true}
 	service := newSharedBotProjectService(t, openTestStore(t), api, sharedBotToken, nil)
 
-	_, err := service.Validate(context.Background(), ValidateProjectInput{Project: "42", OwnerUserID: registrantUserID})
+	// Detailed for a trusted operator; non-trusted callers get the unified
+	// denial (see nonTrustedSharedPrecheckCases).
+	_, err := service.Validate(context.Background(), ValidateProjectInput{Project: "42", OwnerUserID: registrantUserID, TrustedPlatformAdmin: true})
 	assertAppError(t, err, "validation_failed", "shared_bot_credential")
 }
 
@@ -1342,4 +1362,276 @@ func TestValidateSharedCredentialNonTrustedProjectNotFoundStaysUnified(t *testin
 	if !errors.As(err, &appErr) || appErr.Code != "validation_failed" || appErr.Message != "project registration is not permitted" {
 		t.Fatalf("error = %#v, want unified precheck denial", err)
 	}
+}
+
+// sharedPrecheckCase is one way a shared-credential precheck can fail after
+// the caller passed input validation.
+type sharedPrecheckCase struct {
+	name      string
+	project   string
+	configure func(*sharedBotAPI)
+}
+
+func memberLookupError(status int) error {
+	return &gitlab.Error{Op: "member_access", Status: status}
+}
+
+// nonTrustedSharedPrecheckCases lists every precheck failure a non-trusted
+// caller can reach in shared-credential mode. Each one must answer exactly like
+// the denial for a project the shared bot cannot see; otherwise the response
+// tells the caller whether the bot can see the project.
+func nonTrustedSharedPrecheckCases() []sharedPrecheckCase {
+	return []sharedPrecheckCase{
+		{name: "bot cannot see project", project: "42", configure: func(api *sharedBotAPI) {
+			api.fakeGitLab.mu.Lock()
+			api.projectErr = &gitlab.Error{Op: "get_project", Status: http.StatusNotFound}
+			api.fakeGitLab.mu.Unlock()
+		}},
+		{name: "bot below reporter", project: "42", configure: func(api *sharedBotAPI) {
+			api.setAccess(sharedBotToken, botUserID, 10)
+		}},
+		{name: "bot member lookup forbidden", project: "42", configure: func(api *sharedBotAPI) {
+			api.setAccessErr(sharedBotToken, botUserID, memberLookupError(http.StatusForbidden))
+		}},
+		{name: "bot member lookup server error", project: "42", configure: func(api *sharedBotAPI) {
+			api.setAccessErr(sharedBotToken, botUserID, memberLookupError(http.StatusInternalServerError))
+		}},
+		{name: "bot identity lookup server error", project: "42", configure: func(api *sharedBotAPI) {
+			api.userErrs[sharedBotToken] = &gitlab.Error{Op: "current_user", Status: http.StatusBadGateway}
+		}},
+		{name: "registrant member lookup forbidden", project: "42", configure: func(api *sharedBotAPI) {
+			api.setAccessErr(sharedBotToken, registrantUserID, memberLookupError(http.StatusForbidden))
+		}},
+		{name: "registrant member lookup server error", project: "42", configure: func(api *sharedBotAPI) {
+			api.setAccessErr(sharedBotToken, registrantUserID, memberLookupError(http.StatusInternalServerError))
+		}},
+		// The shared credential's own checks run only after the project lookup
+		// succeeded, so their failures must not differ either.
+		{name: "token info forbidden", project: "42", configure: func(api *sharedBotAPI) {
+			api.infoErrs[sharedBotToken] = &gitlab.Error{Op: "token_info", Status: http.StatusForbidden}
+		}},
+		{name: "token info server error", project: "42", configure: func(api *sharedBotAPI) {
+			api.infoErrs[sharedBotToken] = &gitlab.Error{Op: "token_info", Status: http.StatusInternalServerError}
+		}},
+		{name: "token missing scope", project: "42", configure: func(api *sharedBotAPI) {
+			api.infoByToken[sharedBotToken] = &gitlab.TokenInfo{Scopes: []string{"api"}, Active: true}
+		}},
+		{name: "token expired", project: "42", configure: func(api *sharedBotAPI) {
+			expired := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+			api.infoByToken[sharedBotToken] = &gitlab.TokenInfo{
+				Scopes: []string{"api", "read_repository"}, Active: true, ExpiresAt: &expired,
+			}
+		}},
+		{name: "token inactive", project: "42", configure: func(api *sharedBotAPI) {
+			api.infoByToken[sharedBotToken] = &gitlab.TokenInfo{Scopes: []string{"api", "read_repository"}}
+		}},
+		// GitLab may resolve a renamed project through a redirect, or a path
+		// with different casing case-insensitively, and return the canonical
+		// project; the identity check then rejects it.
+		{name: "renamed project", project: "group/old-name", configure: func(*sharedBotAPI) {}},
+		{name: "path casing differs", project: "Group/Repo", configure: func(*sharedBotAPI) {}},
+		{name: "web URL outside trusted root", project: "42", configure: func(api *sharedBotAPI) {
+			api.fakeGitLab.mu.Lock()
+			project := *api.project
+			project.WebURL = "https://other.example.com/group/repo"
+			api.project = &project
+			api.fakeGitLab.mu.Unlock()
+		}},
+	}
+}
+
+// assertUnifiedPrecheckDenial requires the exact response of
+// registrationPrecheckDenied: same code, message, details and no upstream
+// status, so no two denial causes can be told apart.
+func assertUnifiedPrecheckDenial(t *testing.T, err error) {
+	t.Helper()
+	var appErr *Error
+	if !errors.As(err, &appErr) {
+		t.Fatalf("error = %v, want *app.Error", err)
+	}
+	if want := registrationPrecheckDenied(); !reflect.DeepEqual(appErr, want) {
+		t.Fatalf("error = %#v (details %+v), want unified denial %#v (details %+v)", appErr, appErr.Details, want, want.Details)
+	}
+}
+
+func TestRegisterSharedCredentialNonTrustedPrecheckFailuresMatchInvisibleProject(t *testing.T) {
+	for _, tc := range nonTrustedSharedPrecheckCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := openTestStore(t)
+			api := newSharedBotAPI()
+			configureSharedBot(api)
+			tc.configure(api)
+			service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
+
+			_, err := service.Register(ctx, RegisterInput{Project: tc.project, OwnerUserID: registrantUserID, AutoWebhook: true})
+			assertUnifiedPrecheckDenial(t, err)
+			assertRegisterResidueFree(t, ctx, st, api)
+		})
+	}
+}
+
+func TestValidateSharedCredentialNonTrustedPrecheckFailuresMatchInvisibleProject(t *testing.T) {
+	for _, tc := range nonTrustedSharedPrecheckCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := openTestStore(t)
+			api := newSharedBotAPI()
+			configureSharedBot(api)
+			tc.configure(api)
+			service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
+
+			_, err := service.Validate(ctx, ValidateProjectInput{Project: tc.project, OwnerUserID: registrantUserID})
+			assertUnifiedPrecheckDenial(t, err)
+			if projects, err := st.ListProjects(ctx); err != nil || len(projects) != 0 {
+				t.Fatalf("projects after failed validation = %v, %v", projects, err)
+			}
+		})
+	}
+}
+
+// A non-admin registering with a project access token gets the same denial for
+// every membership or identity failure of that token.
+func TestRegisterPerProjectTokenNonTrustedPrecheckFailuresAreUnified(t *testing.T) {
+	const tokenUserID = int64(9) // fakeGitLab's default CurrentUser
+	cases := []sharedPrecheckCase{
+		{name: "token cannot see project", project: "42", configure: func(api *sharedBotAPI) {
+			api.fakeGitLab.mu.Lock()
+			api.projectErr = &gitlab.Error{Op: "get_project", Status: http.StatusNotFound}
+			api.fakeGitLab.mu.Unlock()
+		}},
+		{name: "token user not a member", project: "42", configure: func(*sharedBotAPI) {}},
+		{name: "member lookup forbidden", project: "42", configure: func(api *sharedBotAPI) {
+			api.setAccessErr(projectAccessTok, tokenUserID, memberLookupError(http.StatusForbidden))
+		}},
+		{name: "member lookup server error", project: "42", configure: func(api *sharedBotAPI) {
+			api.setAccessErr(projectAccessTok, tokenUserID, memberLookupError(http.StatusServiceUnavailable))
+		}},
+		{name: "renamed project", project: "group/old-name", configure: func(api *sharedBotAPI) {
+			api.setAccess(projectAccessTok, tokenUserID, reporterAccessLevel)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := openTestStore(t)
+			api := newSharedBotAPI()
+			configureSharedBot(api)
+			tc.configure(api)
+			service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
+
+			_, err := service.Register(ctx, RegisterInput{Project: tc.project, AccessToken: projectAccessTok, OwnerUserID: registrantUserID, AutoWebhook: true})
+			assertUnifiedPrecheckDenial(t, err)
+			assertRegisterResidueFree(t, ctx, st, api)
+		})
+	}
+}
+
+// A 401 means GitLab rejected the shared credential itself before resolving
+// any project, so it is the same for every project and stays actionable even
+// for a non-trusted caller.
+func TestSharedCredentialNonTrustedUnauthorizedNamesCredential(t *testing.T) {
+	cases := []sharedPrecheckCase{
+		{name: "member lookup", project: "42", configure: func(api *sharedBotAPI) {
+			api.setAccessErr(sharedBotToken, botUserID, memberLookupError(http.StatusUnauthorized))
+		}},
+		{name: "token info", project: "42", configure: func(api *sharedBotAPI) {
+			api.infoErrs[sharedBotToken] = &gitlab.Error{Op: "token_info", Status: http.StatusUnauthorized}
+		}},
+	}
+	assertUnauthorized := func(t *testing.T, err error) {
+		t.Helper()
+		assertAppError(t, err, "gitlab_rejected", "shared_bot_credential")
+		var appErr *Error
+		if !errors.As(err, &appErr) || appErr.Upstream != http.StatusUnauthorized {
+			t.Fatalf("error = %#v, want upstream 401", err)
+		}
+	}
+	for _, tc := range cases {
+		t.Run("register "+tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := openTestStore(t)
+			api := newSharedBotAPI()
+			configureSharedBot(api)
+			tc.configure(api)
+			service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
+
+			_, err := service.Register(ctx, RegisterInput{Project: tc.project, OwnerUserID: registrantUserID, AutoWebhook: true})
+			assertUnauthorized(t, err)
+			assertRegisterResidueFree(t, ctx, st, api)
+		})
+		t.Run("validate "+tc.name, func(t *testing.T) {
+			api := newSharedBotAPI()
+			configureSharedBot(api)
+			tc.configure(api)
+			service := newSharedBotProjectService(t, openTestStore(t), api, sharedBotToken, nil)
+
+			_, err := service.Validate(context.Background(), ValidateProjectInput{Project: tc.project, OwnerUserID: registrantUserID})
+			assertUnauthorized(t, err)
+		})
+	}
+}
+
+// Cancellation is the caller's own request ending, not a GitLab answer about
+// the project; it must stay a context error so the HTTP layer maps it as such.
+func TestRegisterSharedCredentialNonTrustedMemberLookupCanceledStaysContextError(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	api.setAccessErr(sharedBotToken, registrantUserID, context.Canceled)
+	service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
+
+	_, err := service.Register(ctx, RegisterInput{Project: "42", OwnerUserID: registrantUserID, AutoWebhook: true})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	assertRegisterResidueFree(t, ctx, st, api)
+}
+
+func TestSharedCredentialTrustedAdminMemberLookupForbiddenStaysDetailed(t *testing.T) {
+	assertForbidden := func(t *testing.T, err error) {
+		t.Helper()
+		assertAppError(t, err, "gitlab_rejected", "shared_bot_credential")
+		var appErr *Error
+		if !errors.As(err, &appErr) || appErr.Upstream != http.StatusForbidden {
+			t.Fatalf("error = %#v, want upstream 403", err)
+		}
+	}
+	t.Run("register", func(t *testing.T) {
+		ctx := context.Background()
+		st := openTestStore(t)
+		api := newSharedBotAPI()
+		configureSharedBot(api)
+		api.setAccessErr(sharedBotToken, botUserID, memberLookupError(http.StatusForbidden))
+		service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
+
+		_, err := service.Register(ctx, RegisterInput{Project: "42", OwnerUserID: registrantUserID, AutoWebhook: true, TrustedPlatformAdmin: true})
+		assertForbidden(t, err)
+		assertRegisterResidueFree(t, ctx, st, api)
+	})
+	t.Run("validate", func(t *testing.T) {
+		api := newSharedBotAPI()
+		configureSharedBot(api)
+		api.setAccessErr(sharedBotToken, botUserID, memberLookupError(http.StatusForbidden))
+		service := newSharedBotProjectService(t, openTestStore(t), api, sharedBotToken, nil)
+
+		_, err := service.Validate(context.Background(), ValidateProjectInput{Project: "42", TrustedPlatformAdmin: true})
+		assertForbidden(t, err)
+	})
+}
+
+func TestSharedCredentialTrustedAdminProjectIdentityMismatchStaysDetailed(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	api := newSharedBotAPI()
+	configureSharedBot(api)
+	service := newSharedBotProjectService(t, st, api, sharedBotToken, nil)
+
+	_, err := service.Register(ctx, RegisterInput{Project: "group/old-name", OwnerUserID: registrantUserID, AutoWebhook: true, TrustedPlatformAdmin: true})
+	assertAppError(t, err, "gitlab_rejected", "")
+	assertRegisterResidueFree(t, ctx, st, api)
+
+	_, err = service.Validate(ctx, ValidateProjectInput{Project: "group/old-name", TrustedPlatformAdmin: true})
+	assertAppError(t, err, "gitlab_rejected", "")
 }

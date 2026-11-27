@@ -401,7 +401,10 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 		return nil, upstreamError(status)
 	}
 	if err := s.verifyProject(project, ref, false); err != nil {
-		return nil, err
+		// GitLab may answer a renamed path through a redirect or a path with
+		// different casing case-insensitively; a non-trusted caller would then
+		// see an identity error only for projects the credential can see.
+		return nil, s.precheckFailure(in.TrustedPlatformAdmin, precheckProjectID(project), "project_identity", err)
 	}
 	var info *gitlab.TokenInfo
 	if sharedMode {
@@ -415,13 +418,15 @@ func (s *ProjectService) Register(ctx context.Context, in RegisterInput) (*Regis
 			}
 			status := gitlab.StatusOf(err)
 			s.logger.Warn("GitLab shared token lookup failed", "status", status)
+			var tokenErr error = upstreamError(status)
 			if status == http.StatusUnauthorized || status == http.StatusForbidden {
-				return nil, sharedBotCredentialError(status)
+				tokenErr = sharedBotCredentialError(status)
 			}
-			return nil, upstreamError(status)
+			// Reached only after the project lookup succeeded; see precheckFailure.
+			return nil, s.precheckFailure(in.TrustedPlatformAdmin, project.ID, "shared_token_info", tokenErr)
 		}
 		if err := validateSharedBotTokenInfo(info, s.now()); err != nil {
-			return nil, err
+			return nil, s.precheckFailure(in.TrustedPlatformAdmin, project.ID, "shared_token_info", err)
 		}
 		// The shared bot only needs Reporter: it reads code/MRs and writes review
 		// notes. Webhook lifecycle is handled by the provisioning credential.
@@ -744,21 +749,64 @@ func (s *ProjectService) verifySharedRegistrantMembership(ctx context.Context, p
 	return nil
 }
 
-// precheckFailure keeps membership denial details for trusted operators while
-// giving every non-trusted caller the same sanitized text. The fine-grained
-// reason is written to the audit log, never to the response: otherwise any
-// signed-in user could enumerate shared-bot-visible projects and their access
-// state by comparing validation errors.
+// precheckFailure keeps membership and project identity details for trusted
+// operators while giving every non-trusted caller the same sanitized text. The
+// fine-grained reason is written to the audit log, never to the response:
+// otherwise any signed-in user could enumerate shared-bot-visible projects and
+// their access state by comparing errors.
+//
+// These checks run only after the project lookup succeeded, so any answer
+// that differs from the invisible-project denial reveals that the credential
+// can see the project. That includes GitLab rejections of a member lookup: a
+// 403 or 5xx is returned for one specific project and is therefore unified
+// with the rest. Two cases stay distinguishable:
+//   - context cancellation and deadline errors, which describe the caller's
+//     own request rather than anything GitLab said about the project;
+//   - a 401, which GitLab returns when it rejects the credential itself,
+//     before it resolves any project. An invalid shared credential answers 401
+//     for every project alike (the project lookup fails the same way first),
+//     so it reveals nothing project-specific and keeps its actionable
+//     shared_bot_credential detail.
+//
+// The shared credential's own checks (token self-lookup, scope, expiry and
+// active state) are instance-wide, but they too run only after a successful
+// project lookup, so a misconfigured credential would otherwise answer
+// differently for visible and invisible projects; they are unified as well.
+// The project lookup itself is not routed here: its 403 (a scope rejection of
+// the shared credential) and 5xx answers come before visibility is known and
+// are treated as instance-wide or transient failures.
 func (s *ProjectService) precheckFailure(trusted bool, projectID int64, reason string, err error) error {
-	s.logger.Warn("project precheck denied", "project_id", projectID, "reason", reason, "status", gitlab.StatusOf(err))
+	s.logger.Warn("project precheck denied", "project_id", projectID, "reason", reason, "status", precheckStatus(err))
 	if trusted {
 		return err
 	}
-	var appErr *Error
-	if errors.As(err, &appErr) && appErr.Code == "validation_failed" {
-		return registrationPrecheckDenied()
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
 	}
-	return err
+	var appErr *Error
+	if errors.As(err, &appErr) && appErr.Code == "gitlab_rejected" && appErr.Upstream == http.StatusUnauthorized {
+		return err
+	}
+	return registrationPrecheckDenied()
+}
+
+// precheckStatus reports the upstream GitLab status for the audit log, whether
+// err is a raw GitLab error or an already translated *Error.
+func precheckStatus(err error) int {
+	var appErr *Error
+	if errors.As(err, &appErr) {
+		return appErr.Upstream
+	}
+	return gitlab.StatusOf(err)
+}
+
+// precheckProjectID returns the looked-up project ID for the audit log; a
+// malformed lookup result may not carry one.
+func precheckProjectID(project *gitlab.Project) int64 {
+	if project == nil {
+		return 0
+	}
+	return project.ID
 }
 
 // registrationPrecheckDenied is the single denial text non-trusted registrants
@@ -940,7 +988,9 @@ func (s *ProjectService) Validate(ctx context.Context, in ValidateProjectInput) 
 		return nil, s.validationUpstreamError(ctx, "get_project", err)
 	}
 	if err := s.verifyProject(project, ref, true); err != nil {
-		return nil, err
+		// Same reasoning as Register: the identity check runs only for a
+		// project the credential can see, so its error must not differ.
+		return nil, s.precheckFailure(in.TrustedPlatformAdmin, precheckProjectID(project), "project_identity", err)
 	}
 
 	var (
@@ -953,13 +1003,21 @@ func (s *ProjectService) Validate(ctx context.Context, in ValidateProjectInput) 
 		info, err = s.sharedTokenInfo(ctx)
 		if err != nil {
 			status := gitlab.StatusOf(err)
+			var tokenErr error
 			if status == http.StatusUnauthorized || status == http.StatusForbidden {
-				return nil, sharedBotCredentialError(status)
+				tokenErr = sharedBotCredentialError(status)
+			} else {
+				tokenErr = s.validationUpstreamError(ctx, "get_token", err)
 			}
-			return nil, s.validationUpstreamError(ctx, "get_token", err)
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				// Cancellation and the validation deadline keep their existing
+				// mapping; they describe this request, not the project.
+				return nil, tokenErr
+			}
+			return nil, s.precheckFailure(in.TrustedPlatformAdmin, project.ID, "shared_token_info", tokenErr)
 		}
 		if err := validateSharedBotTokenInfo(info, s.now()); err != nil {
-			return nil, err
+			return nil, s.precheckFailure(in.TrustedPlatformAdmin, project.ID, "shared_token_info", err)
 		}
 		user, botAccess, err := s.sharedBotMembership(ctx, project.ID)
 		if err != nil {
