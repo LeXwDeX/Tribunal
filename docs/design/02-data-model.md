@@ -29,6 +29,7 @@
 | `feedback` | 反馈 | 👍/👎、resolve 信号 |
 | `feedback_collection_state` | 反馈 | 反馈采集最近成功时间与最近错误类别，单行（0033） |
 | `users`、`sessions`、`api_tokens` | 访问控制 | 本地用户、停用状态、角色、全局只读（0027）、持久会话与 CLI token |
+| `alert_acks` | 访问控制 | 每个用户对总览告警的已读记录，键与指纹由控制台计算（0037） |
 | `llm_models` | 模型 | 用户模型、参数、加密凭据与软删除（0026） |
 | `llm_model_defaults` | 模型 | `user:` 模型的平台级默认参数，单行（0029） |
 | `review_profile_overrides`、`review_profile_model_refs` | 模型 | 评审档位节点覆盖与模型引用（0028） |
@@ -441,6 +442,18 @@ CREATE TABLE api_tokens (
   created_at   TEXT    NOT NULL
 );
 ```
+
+```sql
+CREATE TABLE alert_acks (
+  user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  alert_key   TEXT    NOT NULL,      -- 控制台计算的告警键，如 workspace-42、reviews-incomplete
+  fingerprint TEXT    NOT NULL,      -- 已读时的状态摘要；聚合告警为 finished_at 水位
+  acked_at    TEXT    NOT NULL,
+  PRIMARY KEY (user_id, alert_key)
+) WITHOUT ROWID;
+```
+
+> `alert_acks`（`0037_alert_acks.sql`）保存每个用户在总览「告警」面板上的已读标记。`alert_key` 与 `fingerprint` 由浏览器计算，服务端只按用户存取，不解析键、不据此查询项目或评审，因此不能借键探测对象是否存在；错误原文在指纹里只以 FNV-1a 哈希出现。写入时在同一事务内最多保留该用户 1000 行：刚写入的行总是保留（即使时钟回拨使它的 `acked_at` 最旧），其余按与列表相同的顺序（`acked_at DESC, alert_key ASC`）保留最新的 999 行，超出部分删除；没有按时间的过期清理。用户行删除时级联删除；停用用户的已读记录保留（受 1000 行上限约束），重新启用后仍有效。键对服务端不透明，项目删除时不会清理指向它的已读记录，这些记录留到被上限淘汰为止；项目类指纹包含 `project.created_at`，同一 ID 重新注册的项目不受旧记录影响。该迁移只追加一张表，旧二进制会忽略它；没有 down migration，回滚需恢复升级前快照与匹配的旧二进制。
 
 > `0003_review_state.sql` 另建 `review_controls`（每 MR 的 generation、head 和取消意图）和 `workflow_dossiers`（脱敏后的 gzip 材料快照，`job_id` 唯一）。它们用于取消旧评审和崩溃恢复，详见迁移文件。
 

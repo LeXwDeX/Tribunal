@@ -6,6 +6,8 @@ import type {
   AdminUser,
   AdminUserPage,
   AdminUserWriteResult,
+  AlertAck,
+  AlertAckList,
   ApiToken,
   ApiTokenPage,
   BlockBinding,
@@ -484,6 +486,19 @@ export async function renewApiToken(id: string | number, expiresInDays: number, 
     body: { expires_in_days: expiresInDays },
     signal,
   })
+}
+
+// Alert acks are browser-session only; writes carry the CSRF token.
+export async function listAlertAcks(): Promise<AlertAckList> {
+  return request<AlertAckList>('/api/v1/alert-acks')
+}
+
+export async function putAlertAck(key: string, fingerprint: string): Promise<AlertAck> {
+  return request<AlertAck>(`/api/v1/alert-acks/${segment(key)}`, { method: 'PUT', body: { fingerprint } })
+}
+
+export async function deleteAlertAck(key: string): Promise<void> {
+  await request<void>(`/api/v1/alert-acks/${segment(key)}`, { method: 'DELETE' })
 }
 
 // Access administration ----------------------------------------------------

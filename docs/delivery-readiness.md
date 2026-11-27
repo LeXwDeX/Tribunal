@@ -650,7 +650,7 @@ v1.2.0 尚未发布：版本说明已合并到 `main`，尚未打 tag，也未�
 
 ## 迁移与回退边界
 
-- 迁移实现：`internal/store/sqlite/sqlite.go` 的 `migrate()`；迁移文件由 `internal/store/migrations/migrations.go` 通过 `//go:embed *.sql` 嵌入。截至当前版本，嵌入的迁移文件为 `0001`、`0003`–`0036`，共 35 个（没有 `0002`）。确认迁移结果时按嵌入文件集合核对，不把最大版本号当数量。v1.2.0 语境下，`0016`–`0024` 属于 v1.2.0，其升级基线为 `0001`、`0003`–`0024`，共 23 个。
+- 迁移实现：`internal/store/sqlite/sqlite.go` 的 `migrate()`；迁移文件由 `internal/store/migrations/migrations.go` 通过 `//go:embed *.sql` 嵌入。截至当前版本，嵌入的迁移文件为 `0001`、`0003`–`0037`，共 36 个（没有 `0002`）。确认迁移结果时按嵌入文件集合核对，不把最大版本号当数量。v1.2.0 语境下，`0016`–`0024` 属于 v1.2.0，其升级基线为 `0001`、`0003`–`0024`，共 23 个。
 - 每个未应用迁移单独开事务；没有 down migration。启动时只跳过 `schema_migrations` 已记录的版本；数据库中已记录、但不在当前嵌入文件列表的高版本会被忽略而不报错。
 - v1.4.0 新增 `0030_remove_cost`：重建 `workflows`/`workflow_nodes` 去掉 `cost_micros`，迁移期间关闭外键检查、完成后恢复并执行 `foreign_key_check`；同时从模型参数剥离 legacy `price`。不可逆，旧库/新库迁移回归在本地通过；真实升级演练 BLOCKED（缺隔离部署环境）。
 - v1.4.0 新增 `0029_model_param_defaults`：新建单行 `llm_model_defaults`，无数据转换；未保存时读取为空文档 `revision 0`。不可逆，0028 旧库/新库迁移回归在本地通过；真实升级演练 BLOCKED（缺隔离部署环境）。

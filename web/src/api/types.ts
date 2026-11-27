@@ -47,6 +47,18 @@ export type ApiTokenPage = Page<ApiToken> & { tokens: ApiToken[] }
 export type ContextDocPage = Page<ContextDoc> & { documents: ContextDoc[] }
 export type CallPage = Page<LlmCall> & { calls: LlmCall[]; retention?: CallRetention }
 
+// AlertAck is the caller's own "read" mark on an overview alert (#656). Key
+// and fingerprint are computed by the console; the server stores them opaquely.
+export interface AlertAck {
+  key: string
+  fingerprint: string
+  acked_at: string
+}
+
+export interface AlertAckList {
+  acks: AlertAck[]
+}
+
 export interface CallRetention {
   llm_call_retention_hours?: number
   purge_before?: string
